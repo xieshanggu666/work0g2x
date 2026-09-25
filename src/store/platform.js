@@ -117,6 +117,30 @@ export const PURCHASE_PURPOSE = {
   aftersale: '售后缺货补发履约'
 }
 
+// 供应商账单状态文案与样式标记
+// 采购单入库完成自动出账 unsettled 待结算 → 运营发起结算单后 settling 结算中 → 财务复核通过 settled 已结算
+export const SUPPLIER_BILL_STATUS = {
+  unsettled: { label: '待结算', tone: 'warn' },
+  settling: { label: '结算中', tone: 'info' },
+  settled: { label: '已结算', tone: 'ok' }
+}
+
+// 供应商结算单状态文案与样式标记
+// pending 待财务复核 → settled 已结算（复核通过、库存对账回写勾稽，终态）｜ rejected 已驳回（账单回退待结算，可重新发起）
+export const SETTLE_STATUS = {
+  pending: { label: '待复核', tone: 'warn' },
+  settled: { label: '已结算', tone: 'ok' },
+  rejected: { label: '已驳回', tone: 'bad' }
+}
+
+// 验收差异原因（本批到货数 − 合格入库数；差异件不入库、消耗待收额度、在供应商账单中扣款）
+export const ACCEPT_DIFF_REASONS = {
+  damage: { label: '运输破损', tone: 'bad', icon: '💥' },
+  shortage: { label: '发货短缺', tone: 'warn', icon: '📉' },
+  reject: { label: '质检不合格', tone: 'bad', icon: '🔍' },
+  other: { label: '其他差异', tone: 'muted', icon: '❓' }
+}
+
 // 卡券账户实例状态文案与样式标记
 // available 待核销（发券即入账）→ redeemed 已核销（运营扫码核销）/ expired 已过期（到期扫描）
 // 风控冻结期不生成券账户实例（库存预占）：放行后发券交付，撤销则库存回补、券始终不发出
@@ -143,6 +167,7 @@ export const AUDIT_MODULES = {
   ship: '物流发货',
   aftersale: '售后闭环',
   purchase: '采购入库',
+  settle: '供应商结算',
   coupon: '卡券核销',
   recon: '积分库存对账',
   system: '系统'
@@ -157,6 +182,7 @@ const ACTION_MODULE_PREFIX = [
   ['ship-', 'ship'],
   ['aftersale-', 'aftersale'],
   ['purchase-', 'purchase'], ['po-', 'purchase'],
+  ['settle-', 'settle'], ['bill-', 'settle'], ['supplier-bill', 'settle'],
   ['coupon-', 'coupon'],
   ['recon-', 'recon'],
   ['day-rollover', 'system']
@@ -189,7 +215,9 @@ export const usePlatformStore = defineStore('platform', {
     riskOrders: [],             // 风控审核单
     afterSales: [],             // 售后单（append-only）：拒收/退货/补发申请与审核回写留痕（waiting_stock：缺货待补货，入库后继续履约）
     purchaseOrders: [],         // 采购单（append-only）：运营按活动奖品/商城商品发起，审批后分批验收入库
-    inboundBatches: [],         // 采购验收批次（append-only）：{ poId, qty, remainBefore/After, acceptedInbound }
+    inboundBatches: [],         // 采购验收批次（append-only）：{ poId, qty 合格入库, arrivedQty 到货, diffQty 验收差异, remainBefore/After }
+    supplierBills: [],          // 供应商账单（append-only）：采购入完自动出账，按验收合格数 × 单价 − 验收差异扣款，待结算→结算中→已结算
+    settleOrders: [],           // 供应商结算单（append-only）：运营发起 → 财务复核通过/驳回；复核时按采购批次与售后补发回写库存对账快照
     auditLogs: [],              // 操作记录（审计日志）
     reconBills: [],             // 积分库存对账差异单（按业务日，append-only 保留执行/复核/补偿痕迹）
     stockAdjustments: [],       // 库存校正台账（append-only）：对账补偿对 remain 的修正凭证
@@ -359,6 +387,12 @@ export const usePlatformStore = defineStore('platform', {
           purchaseToInbound: s.purchaseOrders.filter((o) => inT(o) && ['approved', 'receiving'].includes(o.status)).length,
           purchaseReceived: s.purchaseOrders.filter((o) => inT(o) && o.status === 'received').length,
           purchaseInboundQty: s.inboundBatches.filter((b) => inT(b)).reduce((n, b) => n + (b.qty || 0), 0),
+          // 供应商结算看板：待结算账单 / 待财务复核 / 已结算 / 累计结算金额 / 验收差异件数
+          billUnsettled: s.supplierBills.filter((b) => inT(b) && b.status === 'unsettled').length,
+          settlePending: s.settleOrders.filter((o) => inT(o) && o.status === 'pending').length,
+          settleDone: s.settleOrders.filter((o) => inT(o) && o.status === 'settled').length,
+          settleAmount: s.settleOrders.filter((o) => inT(o) && o.status === 'settled').reduce((n, o) => n + (o.amount || 0), 0),
+          acceptDiffQty: s.inboundBatches.filter((b) => inT(b)).reduce((n, b) => n + (b.diffQty || 0), 0),
           // 卡券看板：累计发券 / 待核销 / 已核销 / 已过期 / 风控预占待交付
           couponIssued: s.coupons.filter(inT).length,
           couponAvailable: s.coupons.filter((c) => inT(c) && c.status === 'available').length,
@@ -412,6 +446,14 @@ export const usePlatformStore = defineStore('platform', {
     // 当前租户内采购验收批次
     scopedInboundBatches(s) {
       return s.inboundBatches.filter((b) => (b.tenantId || 't-star') === s.activeTenantId)
+    },
+    // 当前租户内供应商账单
+    scopedSupplierBills(s) {
+      return s.supplierBills.filter((b) => (b.tenantId || 't-star') === s.activeTenantId)
+    },
+    // 当前租户内供应商结算单
+    scopedSettleOrders(s) {
+      return s.settleOrders.filter((o) => (o.tenantId || 't-star') === s.activeTenantId)
     },
     // 当前租户内风控审核单
     scopedRiskOrders(s) {
@@ -510,6 +552,13 @@ export const usePlatformStore = defineStore('platform', {
         (o) => (o.tenantId || 't-star') === s.activeTenantId &&
           ['approved', 'receiving'].includes(o.status)
       ).length
+    },
+    // 供应商结算 Tab 角标：财务看待复核结算单；运营看待结算账单（按当前租户）
+    pendingSettleCount(s) {
+      const tid = s.activeTenantId
+      const pendingReview = s.settleOrders.filter((o) => (o.tenantId || 't-star') === tid && o.status === 'pending').length
+      const unsettled = s.supplierBills.filter((b) => (b.tenantId || 't-star') === tid && b.status === 'unsettled').length
+      return s.role === 'operator' ? pendingReview + unsettled : pendingReview
     },
     // 用户售后待办角标：我的申请仍在审核中（按当前租户）
     myAfterSalePendingCount(s) {
@@ -1012,6 +1061,11 @@ export const usePlatformStore = defineStore('platform', {
           'aftersale-apply': '售后申请',
           'aftersale-approve': '售后审核通过',
           'aftersale-dismiss': '售后驳回',
+          'supplier-bill': '供应商账单生成',
+          'settle-apply': '发起供应商结算',
+          'settle-review': '结算复核通过',
+          'settle-reject': '结算复核驳回',
+          'settle-recon': '结算对账回写',
           'coupon-issue': '卡券发放',
           'coupon-hold': '卡券预占',
           'coupon-deliver': '放行发券',
@@ -2088,6 +2142,11 @@ export const usePlatformStore = defineStore('platform', {
       const qty = Math.floor(Number(form.qty) || 0)
       if (qty <= 0) { this.showToast('采购数量需为正整数', 'warn'); this.endTrace(); return null }
       if (qty > 9999) { this.showToast('单笔采购数量不超过 9999', 'warn'); this.endTrace(); return null }
+      // 预估单价（元/件）：采购入完出供应商账单时作为结算基准（差异件按单价扣款）
+      const unitPrice = Math.round((Number(form.unitPrice) || 0) * 100) / 100
+      if (!(unitPrice > 0)) { this.showToast('请填写采购预估单价（元/件，大于 0）', 'warn'); this.endTrace(); return null }
+      if (unitPrice > 999999) { this.showToast('单件单价不超过 999999 元', 'warn'); this.endTrace(); return null }
+      const supplier = (form.supplier || '').trim()
       const reason = (form.reason || '').trim()
       if (!reason) { this.showToast('请填写采购事由', 'warn'); this.endTrace(); return null }
 
@@ -2117,7 +2176,10 @@ export const usePlatformStore = defineStore('platform', {
         targetName: hit.snap.targetName,
         icon: hit.snap.icon,
         qty,                            // 审批采购数量
-        inboundQty: 0,                  // 累计验收实收
+        unitPrice,                      // 预估单价（元/件），供应商账单结算基准
+        supplier,                       // 供应商（可选；为空时取验收批次承运方）
+        inboundQty: 0,                  // 累计验收合格入库数
+        diffQty: 0,                     // 累计验收差异件数（到货 − 合格，不入库、入完时账单扣款）
         status: 'pending',
         purpose: linkedAfterSale ? 'aftersale' : 'normal',
         purposeLabel: linkedAfterSale ? PURCHASE_PURPOSE.aftersale : PURCHASE_PURPOSE.normal,
@@ -2132,7 +2194,7 @@ export const usePlatformStore = defineStore('platform', {
       }
       this.purchaseOrders.unshift(po)
       this.addAuditLog('purchase-apply', po.id,
-        `发起采购【${hit.snap.targetName}】×${qty}（${targetType === 'prize' ? '活动奖品' : '商城商品'}，事由：${reason}）` +
+        `发起采购【${hit.snap.targetName}】×${qty}（${targetType === 'prize' ? '活动奖品' : '商城商品'}，单价 ${unitPrice} 元/件${supplier ? `，供应商 ${supplier}` : ''}，事由：${reason}）` +
         (linkedAfterSale ? `；关联待补货售后单 ${linkedAfterSale.id}，入库后继续补发履约` : ''),
         { module: 'purchase', tenantId: tid, traceId: trace })
       this.showToast(`🛒 采购申请已提交：${hit.snap.targetName} ×${qty}，等待审批`, 'success')
@@ -2196,9 +2258,10 @@ export const usePlatformStore = defineStore('platform', {
       return true
     },
 
-    // 分批验收入库（RBAC：purchase:inbound；仅本租户、approved/receiving 可验；实收>0 且累计不超审批数量）
-    // 每批：remain += qty、stock += qty（账面总量同步抬升），追加 append-only 验收批次；
-    // 累计入满 → received 终态；关联待补货售后时提示可继续履约（不自动代审）。
+    // 分批验收入库（RBAC：purchase:inbound；仅本租户、approved/receiving 可验）
+    // 录入口径：本批到货 arrivedQty、合格入库 qty（≤ 到货）；差异 diffQty = 到货 − 合格（破损/短缺/质检不合格）。
+    //          合格件抬 remain/stock；差异件不入库但消耗待收额度（入完由供应商账单按单价扣款，不再补发）；
+    //          累计（合格 + 差异）达到审批数量 → received 终态并自动生成供应商账单。
     inboundPurchase(poId, form = {}) {
       this.syncBusinessDay()
       const trace = this.beginTrace()
@@ -2211,10 +2274,22 @@ export const usePlatformStore = defineStore('platform', {
         this.showToast('仅已审批 / 验收中的采购单可验收入库', 'warn'); this.endTrace(); return null
       }
       const qty = Math.floor(Number(form.qty) || 0)
-      if (qty <= 0) { this.showToast('本次验收数量需为正整数', 'warn'); this.endTrace(); return null }
-      const remain = po.qty - po.inboundQty
-      if (qty > remain) {
-        this.showToast(`本次验收 ${qty} 超过待收数量 ${remain}（审批 ${po.qty}，已收 ${po.inboundQty}）`, 'warn')
+      if (qty <= 0) { this.showToast('本次合格入库数量需为正整数', 'warn'); this.endTrace(); return null }
+      // 本批到货数缺省 = 合格数（无差异）；差异 = 到货 − 合格 ≥ 0
+      const arrivedQty = form.arrivedQty === undefined || form.arrivedQty === null || form.arrivedQty === ''
+        ? qty : Math.floor(Number(form.arrivedQty) || 0)
+      if (arrivedQty < qty) { this.showToast('本批到货数量不能少于合格入库数量', 'warn'); this.endTrace(); return null }
+      const diffQty = arrivedQty - qty
+      let diffReason = ''
+      let diffLabel = ''
+      if (diffQty > 0) {
+        diffReason = form.diffReason && ACCEPT_DIFF_REASONS[form.diffReason] ? form.diffReason : 'other'
+        diffLabel = ACCEPT_DIFF_REASONS[diffReason].label
+      }
+      // 待收额度按「合格 + 差异」口径：差异件已验收处理（扣款），供应商不再补发
+      const slot = po.qty - po.inboundQty - (po.diffQty || 0)
+      if (arrivedQty > slot) {
+        this.showToast(`本批到货 ${arrivedQty} 超过待收数量 ${slot}（审批 ${po.qty}，已处理 ${po.inboundQty + (po.diffQty || 0)}）`, 'warn')
         this.endTrace(); return null
       }
       const hit = this._purchaseTargetOf(po.targetType, po.activityId, po.targetId)
@@ -2225,7 +2300,10 @@ export const usePlatformStore = defineStore('platform', {
       target.remain += qty
       target.stock += qty
       po.inboundQty += qty
-      po.status = po.inboundQty >= po.qty ? 'received' : 'receiving'
+      po.diffQty = (po.diffQty || 0) + diffQty
+      const done = po.inboundQty + po.diffQty >= po.qty
+      po.status = done ? 'received' : 'receiving'
+      const carrier = (form.carrier || '').trim()
       const batch = {
         id: genId('pb'),
         poId: po.id, poNo: po.poNo,
@@ -2233,9 +2311,12 @@ export const usePlatformStore = defineStore('platform', {
         targetType: po.targetType, activityId: po.activityId, targetId: po.targetId,
         targetName: po.targetName, icon: po.icon,
         qty,
+        arrivedQty,
+        diffQty,
+        diffReason,
         remainBefore: before, remainAfter: target.remain,
         stockBefore: target.stock - qty, stockAfter: target.stock,
-        carrier: (form.carrier || '').trim(),
+        carrier,
         inspector: this.user.name,
         acceptedInbound: true,
         date: this.todayDate, time: nowTime(), ts: Date.now(),
@@ -2243,16 +2324,18 @@ export const usePlatformStore = defineStore('platform', {
       }
       this.inboundBatches.unshift(batch)
       po.batches.push(batch.id)
-      if (po.status === 'received') po.receivedAt = `${this.todayDate} ${nowTime()}`
+      if (done) po.receivedAt = `${this.todayDate} ${nowTime()}`
       this.addAuditLog('purchase-inbound', po.id,
-        `采购验收入库【${po.targetName}】本批 +${qty}（待收余 ${po.qty - po.inboundQty}），库存 ${before}→${target.remain}` +
-        (po.status === 'received' ? '；采购单已全部入库完成' : '，剩余批次待验收') +
-        (batch.carrier ? `；供应商/承运：${batch.carrier}` : ''),
+        `采购验收入库【${po.targetName}】本批到货 ${arrivedQty}、合格入库 +${qty}` +
+        (diffQty > 0 ? `、验收差异 ${diffQty} 件（${diffLabel}，不入库、结算扣款）` : '') +
+        `（待收余 ${po.qty - po.inboundQty - po.diffQty}），库存 ${before}→${target.remain}` +
+        (done ? '；采购单已全部入库完成' : '，剩余批次待验收') +
+        (carrier ? `；供应商/承运：${carrier}` : ''),
         { module: 'purchase', tenantId: po.tenantId, traceId: trace })
 
       // 缺货补发联动：全部入完且关联待补货售后时，提示去售后队列继续履约
       let linkedReady = null
-      if (po.status === 'received' && po.afterSaleId) {
+      if (done && po.afterSaleId) {
         linkedReady = this.afterSales.find((a) => a.id === po.afterSaleId && a.status === 'waiting_stock')
         if (linkedReady) {
           this.addAuditLog('aftersale-resume-ready', linkedReady.id,
@@ -2260,14 +2343,239 @@ export const usePlatformStore = defineStore('platform', {
             { module: 'aftersale', tenantId: po.tenantId, traceId: trace })
         }
       }
+
+      // 入完即自动生成供应商账单（按合格件 × 单价 − 差异扣款），进入待结算队列
+      let bill = null
+      if (done) {
+        bill = this._createSupplierBill(po, trace)
+      }
+
       const tip = linkedReady
         ? `；关联的补发售后（${linkedReady.id}）已可在「待处理售后」继续履约`
         : po.afterSaleId ? '；关联售后单已处理' : ''
       this.showToast(
-        `📥 验收入库 ${qty} 件：${po.targetName} 库存 ${before}→${target.remain}${po.status === 'received' ? '，采购单已入完' : ''}${tip}`,
+        `📥 验收合格 ${qty} 件：${po.targetName} 库存 ${before}→${target.remain}` +
+        (diffQty > 0 ? `；验收差异 ${diffQty} 件（${diffLabel}）` : '') +
+        (done ? `，采购单已入完，供应商账单 ${bill?.billNo || ''} 已生成待结算` : '') + tip,
         'success')
       this.endTrace()
       return batch
+    },
+
+    // 采购单入库完成 → 自动生成供应商账单（一张采购单一张账单；按验收批次汇总合格数/差异数，幂等）
+    // 应付金额 = 合格件数 × 单价；差异扣款 = 差异件数 × 单价（到货总额 − 差异扣款 = 应付）
+    _createSupplierBill(po, traceId = '') {
+      const existed = this.supplierBills.find((b) => b.poId === po.id)
+      if (existed) return existed
+      const batches = this.inboundBatches.filter((b) => b.poId === po.id)
+      const qty = batches.reduce((n, b) => n + (b.qty || 0), 0)
+      const diffQty = batches.reduce((n, b) => n + (b.diffQty || 0), 0)
+      const unitPrice = po.unitPrice || 0
+      const supplier = po.supplier ||
+        [...batches].sort((a, b) => b.ts - a.ts).map((b) => b.carrier).find(Boolean) || '未登记供应商'
+      const bill = {
+        id: genId('sb'),
+        billNo: 'SB' + Date.now().toString(36).toUpperCase() + String(Math.floor(Math.random() * 90) + 10),
+        tenantId: po.tenantId, traceId,
+        poId: po.id, poNo: po.poNo,
+        supplier,
+        targetType: po.targetType, activityId: po.activityId, targetId: po.targetId,
+        targetName: po.targetName, icon: po.icon,
+        purpose: po.purpose, purposeLabel: po.purposeLabel, afterSaleId: po.afterSaleId || '',
+        qty,                                  // 计费合格件数（= 采购单累计合格入库）
+        diffQty,                              // 验收差异件数（不入库、不付款）
+        unitPrice,
+        grossAmount: (qty + diffQty) * unitPrice,   // 到货总额
+        diffAmount: diffQty * unitPrice,            // 差异扣款
+        amount: qty * unitPrice,                    // 应付金额（差异扣款后）
+        status: 'unsettled',
+        batchIds: [...po.batches],
+        settleId: '',
+        applicant: po.applicant,
+        createdAt: this.todayDate, time: nowTime(), ts: Date.now()
+      }
+      this.supplierBills.unshift(bill)
+      this.addAuditLog('supplier-bill', bill.id,
+        `供应商账单 ${bill.billNo} 生成（采购 ${po.poNo} · ${supplier} ·【${po.targetName}】）：` +
+        `合格入库 ${qty} 件 × ${unitPrice} 元，应付 ${bill.amount.toFixed(2)} 元` +
+        (diffQty > 0 ? `；验收差异 ${diffQty} 件，扣款 ${bill.diffAmount.toFixed(2)} 元（到货 ${qty + diffQty} 件）` : '') +
+        '，待运营发起结算',
+        { module: 'settle', tenantId: po.tenantId, traceId })
+      return bill
+    },
+
+    // ===== 供应商结算 =====
+    // 业务链路：采购入完自动出供应商账单（unsettled）→ 活动运营核对账单发起结算单（settle:apply，账单转结算中）
+    //          → 财务复核（settle:review）：通过前按「采购验收批次 + 关联售后补发」逐笔回写库存对账勾稽，
+    //          勾稽一致 → 已结算（账单 settled，留存对账快照）；不一致整体拦截；驳回则账单回退待结算可重新发起。
+    // 账单/结算单 append-only、按 tenantId 强隔离，全部动作写「供应商结算」模块审计。
+
+    // 运营按供应商账单发起结算（RBAC：settle:apply；仅本租户、仅待结算账单）
+    createSettleOrder(billId, form = {}) {
+      this.syncBusinessDay()
+      const trace = this.beginTrace()
+      if (!this.requirePerm('settle:apply', 'settle')) { this.endTrace(); return null }
+      const tid = this.activeTenantId
+      const bill = this.supplierBills.find((b) => b.id === billId)
+      if (!bill || (bill.tenantId || 't-star') !== tid) {
+        this.deny('settle-denied', '供应商账单不存在或不属于当前租户', { module: 'settle', tenantId: tid, traceId: trace })
+        this.endTrace(); return null
+      }
+      if (bill.status !== 'unsettled') {
+        this.showToast(`账单 ${bill.billNo} 当前为「${SUPPLIER_BILL_STATUS[bill.status]?.label || bill.status}」，不能重复发起结算`, 'warn')
+        this.endTrace(); return null
+      }
+      const po = this.purchaseOrders.find((o) => o.id === bill.poId)
+      const remark = (form.note || '').trim()
+      const so = {
+        id: genId('so'),
+        settleNo: 'JS' + Date.now().toString(36).toUpperCase() + String(Math.floor(Math.random() * 90) + 10),
+        tenantId: tid, traceId: trace,
+        billId: bill.id, billNo: bill.billNo,
+        poId: bill.poId, poNo: bill.poNo,
+        supplier: bill.supplier,
+        targetType: bill.targetType, activityId: bill.activityId, targetId: bill.targetId,
+        targetName: bill.targetName, icon: bill.icon,
+        purpose: bill.purpose, purposeLabel: bill.purposeLabel, afterSaleId: bill.afterSaleId || '',
+        qty: bill.qty, diffQty: bill.diffQty, unitPrice: bill.unitPrice,
+        grossAmount: bill.grossAmount, diffAmount: bill.diffAmount, amount: bill.amount,
+        status: 'pending',
+        applicant: this.user.name,
+        applicantId: this.currentMemberId || this.user.id,
+        applyNote: remark,
+        createdAt: this.todayDate, time: nowTime(), ts: Date.now(),
+        reviewedAt: '', reviewer: '', reviewNote: '',
+        reconSnapshot: null
+      }
+      this.settleOrders.unshift(so)
+      bill.status = 'settling'
+      bill.settleId = so.id
+      this.addAuditLog('settle-apply', so.id,
+        `发起供应商结算单 ${so.settleNo}：账单 ${bill.billNo}（采购 ${bill.poNo} · ${bill.supplier} ·【${bill.targetName}】），` +
+        `合格 ${bill.qty} 件 × ${bill.unitPrice} 元，应付 ${bill.amount.toFixed(2)} 元` +
+        (bill.diffQty > 0 ? `（验收差异 ${bill.diffQty} 件已扣款 ${bill.diffAmount.toFixed(2)} 元）` : '') +
+        '，提交财务复核' + (remark ? `；备注：${remark}` : ''),
+        { module: 'settle', tenantId: tid, traceId: trace })
+      this.showToast(`💰 结算单 ${so.settleNo} 已提交：${bill.supplier} ${bill.amount.toFixed(2)} 元，待财务复核`, 'success')
+      this.endTrace()
+      return so
+    },
+
+    // 财务复核结算单（RBAC：settle:review；仅本租户、仅待复核）
+    // 通过前回写库存对账：按采购验收批次汇总合格/差异与账单勾稽，关联售后补发核对补发消耗；
+    // 任一项不一致整体拦截不落账（写 denied 审计），通过则结算单/账单终态并留存勾稽快照。
+    reviewSettleOrder(soId, approve, note = '') {
+      this.syncBusinessDay()
+      const trace = this.beginTrace()
+      const so = this.settleOrders.find((x) => x.id === soId)
+      if (!so) { this.endTrace(); return false }
+      if (!this.requirePerm('settle:review', 'settle') || !this.requireSameTenant(so.tenantId, 'settle')) {
+        this.endTrace(); return false
+      }
+      if (so.status !== 'pending') { this.showToast('该结算单已复核，请勿重复操作', 'warn'); this.endTrace(); return false }
+      const bill = this.supplierBills.find((b) => b.id === so.billId)
+      const remark = note.trim()
+
+      if (!approve) {
+        so.status = 'rejected'
+        so.reviewedAt = `${this.todayDate} ${nowTime()}`
+        so.reviewer = this.user.name
+        so.reviewNote = remark
+        if (bill) { bill.status = 'unsettled'; bill.settleId = '' }
+        this.addAuditLog('settle-reject', so.id,
+          `驳回供应商结算单 ${so.settleNo}（账单 ${so.billNo} · ${so.supplier} · 应付 ${so.amount.toFixed(2)} 元）` +
+          (remark ? `；备注：${remark}` : '') + '；账单回退待结算，可由运营核对后重新发起',
+          { module: 'settle', tenantId: so.tenantId, traceId: trace })
+        this.showToast(`结算单 ${so.settleNo} 已驳回，账单回退待结算`, 'info')
+        this.endTrace()
+        return true
+      }
+
+      if (!bill) {
+        this.deny('settle-denied', `结算单 ${so.settleNo} 关联账单缺失，禁止复核`, { module: 'settle', tenantId: so.tenantId, traceId: trace })
+        this.endTrace(); return false
+      }
+
+      // —— 回写库存对账：按采购验收批次逐笔勾稽账单计费数与差异数 ——
+      const batches = this.inboundBatches.filter((b) => b.poId === so.poId)
+      const batchQty = batches.reduce((n, b) => n + (b.qty || 0), 0)
+      const batchDiff = batches.reduce((n, b) => n + (b.diffQty || 0), 0)
+      const mismatch = []
+      if (batchQty !== bill.qty) mismatch.push(`批次合格入库合计 ${batchQty} ≠ 账单计费 ${bill.qty}`)
+      if (batchDiff !== bill.diffQty) mismatch.push(`批次差异合计 ${batchDiff} ≠ 账单差异 ${bill.diffQty}`)
+      const amountExpect = Math.round(bill.qty * bill.unitPrice * 100) / 100
+      if (amountExpect !== bill.amount) mismatch.push(`账单金额 ${bill.amount} ≠ 合格数 × 单价 ${amountExpect}`)
+
+      // —— 关联售后补发：核对补发单状态与库存消耗（缺货补发采购须等补发落账或确认仍在挂起） ——
+      const linked = so.afterSaleId
+        ? this.afterSales.find((a) => a.id === so.afterSaleId)
+        : null
+      let afterSaleInfo = null
+      if (so.afterSaleId) {
+        if (!linked || (linked.tenantId || 't-star') !== so.tenantId) {
+          mismatch.push(`关联售后补发单 ${so.afterSaleId} 缺失`)
+        } else if (linked.type !== 'reship') {
+          mismatch.push(`关联售后单 ${linked.id} 非补发类型`)
+        } else {
+          afterSaleInfo = {
+            afterSaleId: linked.id, status: linked.status,
+            done: linked.status === 'done',
+            reshipmentId: linked.reshipmentId || '',
+            consumed: linked.status === 'done' ? 1 : 0
+          }
+          if (linked.status === 'waiting_stock') {
+            mismatch.push(`关联补发售后 ${linked.id} 仍挂起待补货，库存尚未回写，暂不可结算`)
+          }
+        }
+      }
+
+      if (mismatch.length) {
+        // 账实不符：不写任何业务状态，拒绝并留痕（运营需重新核对批次/账单或先完成补发履约）
+        this.deny('settle-recon',
+          `结算单 ${so.settleNo} 库存对账勾稽不一致，复核被拦截：${mismatch.join('；')}`,
+          { module: 'settle', tenantId: so.tenantId, traceId: trace, orderId: so.id })
+        this.endTrace()
+        return false
+      }
+
+      // 勾稽一致：留存对账回写快照（批次明细、售后补发、库存账面），结算落终态
+      const targetHit = this._purchaseTargetOf(so.targetType, so.activityId, so.targetId)
+      const snapshot = {
+        reconAt: `${this.todayDate} ${nowTime()}`,
+        reconBy: this.user.name,
+        batchCount: batches.length,
+        batchQty, batchDiff,
+        batchIds: batches.map((b) => b.id),
+        afterSale: afterSaleInfo,
+        stockRemain: targetHit ? targetHit.target.remain : null,
+        stockTotal: targetHit ? targetHit.target.stock : null,
+        qty: bill.qty, diffQty: bill.diffQty, unitPrice: bill.unitPrice,
+        amount: bill.amount,
+        balanced: true
+      }
+      so.status = 'settled'
+      so.reviewedAt = snapshot.reconAt
+      so.reviewer = this.user.name
+      so.reviewNote = remark
+      so.reconSnapshot = snapshot
+      bill.status = 'settled'
+      bill.settleId = so.id
+      this.addAuditLog('settle-review', so.id,
+        `复核通过供应商结算单 ${so.settleNo}（账单 ${bill.billNo} · ${so.supplier}）：` +
+        `合格 ${bill.qty} 件、验收差异 ${bill.diffQty} 件，实付 ${bill.amount.toFixed(2)} 元，账单已结算` +
+        (remark ? `；备注：${remark}` : ''),
+        { module: 'settle', tenantId: so.tenantId, traceId: trace })
+      this.addAuditLog('settle-recon', so.id,
+        `结算 ${so.settleNo} 回写库存对账：采购 ${so.poNo} 验收批次 ${batches.length} 笔，合格入库 ${batchQty} 件、差异 ${batchDiff} 件，与账单逐笔勾稽一致` +
+        (afterSaleInfo
+          ? `；关联售后补发 ${afterSaleInfo.afterSaleId}（${afterSaleInfo.done ? `已履约，补发发货单 ${afterSaleInfo.reshipmentId}，库存消耗 1 件` : afterSaleInfo.status}）`
+          : '') +
+        (targetHit ? `；当前账面 remain=${targetHit.target.remain}/stock=${targetHit.target.stock}` : '') +
+        '；按采购批次与售后补发口径平账，快照随结算单留存',
+        { module: 'settle', tenantId: so.tenantId, traceId: trace })
+      this.showToast(`✅ 结算单 ${so.settleNo} 复核通过：实付 ${bill.amount.toFixed(2)} 元，库存对账勾稽一致已回写`, 'success')
+      this.endTrace()
+      return true
     },
 
     // 某采购单的验收批次（时间倒序）
@@ -3873,7 +4181,7 @@ export const usePlatformStore = defineStore('platform', {
         id: 'seed-po1', poNo: 'POSEED0001', tenantId: 't-star', traceId: '',
         targetType: 'prize', activityId: 'act-1', activityName: '周年庆幸运转盘',
         targetId: 'p3', targetName: '周年庆幸运转盘 / 定制保温杯', icon: '☕',
-        qty: 50, inboundQty: 50, status: 'received',
+        qty: 50, unitPrice: 45, supplier: '优品礼品供应商', inboundQty: 50, diffQty: 0, status: 'received',
         purpose: 'normal', purposeLabel: PURCHASE_PURPOSE.normal, afterSaleId: '',
         reason: '周年庆第二阶段投放加码，保温杯库存不足，申请补货 50 件',
         applicant: '运营小张', applicantId: 'm-star-ops',
@@ -3887,7 +4195,7 @@ export const usePlatformStore = defineStore('platform', {
         id: 'seed-po2', poNo: 'POSEED0002', tenantId: 't-star', traceId: '',
         targetType: 'goods', activityId: null, activityName: '',
         targetId: 'g6', targetName: '限量联名公仔', icon: '🧸',
-        qty: 10, inboundQty: 6, status: 'receiving',
+        qty: 10, unitPrice: 89, supplier: '潮玩供应仓', inboundQty: 6, diffQty: 0, status: 'receiving',
         purpose: 'aftersale', purposeLabel: PURCHASE_PURPOSE.aftersale, afterSaleId: 'seed-as3',
         reason: '补发售后 seed-as3 缺货挂起，采购 10 件：1 件用于补发履约，9 件恢复商城库存',
         applicant: '运营小张', applicantId: 'm-star-ops',
@@ -3901,12 +4209,27 @@ export const usePlatformStore = defineStore('platform', {
         id: 'seed-po3', poNo: 'POSEED0003', tenantId: 't-star', traceId: '',
         targetType: 'prize', activityId: 'act-1', activityName: '周年庆幸运转盘',
         targetId: 'p1', targetName: '周年庆幸运转盘 / iPhone 16', icon: '📱',
-        qty: 2, inboundQty: 0, status: 'pending',
+        qty: 2, unitPrice: 5999, supplier: '数码直供商', inboundQty: 0, diffQty: 0, status: 'pending',
         purpose: 'normal', purposeLabel: PURCHASE_PURPOSE.normal, afterSaleId: '',
         reason: '传说大奖仅剩库存 3（含 1 件风控预占），为国庆加码追加 2 台',
         applicant: '运营小张', applicantId: 'm-star-ops',
         createdAt: this.todayDate, time: '17:15:00', ts: todayAt(17, 15),
         approvedAt: '', approver: '', approveNote: '', receivedAt: '', batches: []
+      })
+      // 9.5e) 盲盒福袋 30 件采购已入完：首批 12 合格；次批到货 18、合格 16、运输破损 2（验收差异扣款）
+      //       入完自动生成供应商账单（待结算），演示「验收差异 → 账单扣款 → 运营发起 → 财务复核」闭环
+      this.purchaseOrders.push({
+        id: 'seed-po4', poNo: 'POSEED0004', tenantId: 't-star', traceId: '',
+        targetType: 'goods', activityId: null, activityName: '',
+        targetId: 'g4', targetName: '盲盒福袋', icon: '🎁',
+        qty: 30, unitPrice: 38, supplier: '好运礼品厂', inboundQty: 28, diffQty: 2, status: 'received',
+        purpose: 'normal', purposeLabel: PURCHASE_PURPOSE.normal, afterSaleId: '',
+        reason: '盲盒福袋活动消耗快，常规补货 30 件',
+        applicant: '运营小张', applicantId: 'm-star-ops',
+        createdAt: dateStr(-1), time: '16:40:00', ts: todayAt(16, 40) - 86400000,
+        approvedAt: `${dateStr(-1)} 17:20:00`, approver: '财务小周', approveNote: '常补品类，同意采购',
+        receivedAt: `${this.todayDate} 14:40:00`,
+        batches: ['seed-pb4', 'seed-pb5']
       })
       // 验收批次（append-only）：保温杯两批 + 公仔首批；库存只在实际验收时按批次抬升 remain/stock
       // 注意：必须改 store 内的响应式实例（this.activities/this.goods），不可用 import 的 mock 原对象
@@ -3914,23 +4237,81 @@ export const usePlatformStore = defineStore('platform', {
       if (p3Store) { p3Store.remain += 50; p3Store.stock += 50 } // 50 件已全部验收入库
       const g6Store = this.goods.find((x) => x.id === 'g6')
       if (g6Store) { g6Store.remain += 6; g6Store.stock += 6 } // 首批实收 6：remain 0→6，stock 2→8（剩 4 件待验收，审批不预抬库存）
+      const g4poStore = this.goods.find((x) => x.id === 'g4')
+      if (g4poStore) { g4poStore.remain += 28; g4poStore.stock += 28 } // 合格入库 28（破损 2 件不入库、差异扣款）：stock/remain 30→58
       this.inboundBatches.push(
         { id: 'seed-pb3', poId: 'seed-po2', poNo: 'POSEED0002', tenantId: 't-star', traceId: '',
           targetType: 'goods', activityId: null, targetId: 'g6', targetName: '限量联名公仔', icon: '🧸',
-          qty: 6, remainBefore: 0, remainAfter: 6, stockBefore: 2, stockAfter: 8,
+          qty: 6, arrivedQty: 6, diffQty: 0, diffReason: '',
+          remainBefore: 0, remainAfter: 6, stockBefore: 2, stockAfter: 8,
           carrier: '潮玩供应仓', inspector: '仓配小李', acceptedInbound: true,
           date: this.todayDate, time: '17:30:00', ts: todayAt(17, 30), note: '首批 6 件验收合格（含补发预留 1 件）' },
+        { id: 'seed-pb5', poId: 'seed-po4', poNo: 'POSEED0004', tenantId: 't-star', traceId: '',
+          targetType: 'goods', activityId: null, targetId: 'g4', targetName: '盲盒福袋', icon: '🎁',
+          qty: 16, arrivedQty: 18, diffQty: 2, diffReason: 'damage',
+          remainBefore: 42, remainAfter: 58, stockBefore: 44, stockAfter: 58,
+          carrier: '好运礼品厂', inspector: '仓配小李', acceptedInbound: true,
+          date: this.todayDate, time: '14:40:00', ts: todayAt(14, 40),
+          note: '次批到货 18 件，16 件合格入库，2 件外箱挤压变形（运输破损拒收，差异待结算扣款）' },
+        { id: 'seed-pb4', poId: 'seed-po4', poNo: 'POSEED0004', tenantId: 't-star', traceId: '',
+          targetType: 'goods', activityId: null, targetId: 'g4', targetName: '盲盒福袋', icon: '🎁',
+          qty: 12, arrivedQty: 12, diffQty: 0, diffReason: '',
+          remainBefore: 30, remainAfter: 42, stockBefore: 30, stockAfter: 42,
+          carrier: '好运礼品厂', inspector: '仓配小李', acceptedInbound: true,
+          date: this.todayDate, time: '11:20:00', ts: todayAt(11, 20), note: '首批 12 件验收合格' },
         { id: 'seed-pb2', poId: 'seed-po1', poNo: 'POSEED0001', tenantId: 't-star', traceId: '',
           targetType: 'prize', activityId: 'act-1', targetId: 'p3', targetName: '周年庆幸运转盘 / 定制保温杯', icon: '☕',
-          qty: 20, remainBefore: 130, remainAfter: 150, stockBefore: 180, stockAfter: 200,
+          qty: 20, arrivedQty: 20, diffQty: 0, diffReason: '',
+          remainBefore: 130, remainAfter: 150, stockBefore: 180, stockAfter: 200,
           carrier: '优品礼品供应商', inspector: '仓配小李', acceptedInbound: true,
           date: this.todayDate, time: '15:05:00', ts: todayAt(15, 5), note: '第二批 20 件，采购 50 件全部入完' },
         { id: 'seed-pb1', poId: 'seed-po1', poNo: 'POSEED0001', tenantId: 't-star', traceId: '',
           targetType: 'prize', activityId: 'act-1', targetId: 'p3', targetName: '周年庆幸运转盘 / 定制保温杯', icon: '☕',
-          qty: 30, remainBefore: 100, remainAfter: 130, stockBefore: 150, stockAfter: 180,
+          qty: 30, arrivedQty: 30, diffQty: 0, diffReason: '',
+          remainBefore: 100, remainAfter: 130, stockBefore: 150, stockAfter: 180,
           carrier: '优品礼品供应商', inspector: '仓配小李', acceptedInbound: true,
           date: this.todayDate, time: '09:40:00', ts: todayAt(9, 40), note: '首批 30 件验收合格' }
       )
+
+      // 9.6) 供应商账单 + 结算单种子：保温杯账单已走完结算闭环；盲盒账单（含 2 件差异扣款）待运营发起
+      this.supplierBills.push(
+        { id: 'seed-sb2', billNo: 'SBSEED0002', tenantId: 't-star', traceId: '',
+          poId: 'seed-po4', poNo: 'POSEED0004', supplier: '好运礼品厂',
+          targetType: 'goods', activityId: null, targetId: 'g4', targetName: '盲盒福袋', icon: '🎁',
+          purpose: 'normal', purposeLabel: PURCHASE_PURPOSE.normal, afterSaleId: '',
+          qty: 28, diffQty: 2, unitPrice: 38,
+          grossAmount: 1140, diffAmount: 76, amount: 1064,
+          status: 'unsettled', batchIds: ['seed-pb4', 'seed-pb5'], settleId: '', applicant: '运营小张',
+          createdAt: this.todayDate, time: '14:40:00', ts: todayAt(14, 40) },
+        { id: 'seed-sb1', billNo: 'SBSEED0001', tenantId: 't-star', traceId: '',
+          poId: 'seed-po1', poNo: 'POSEED0001', supplier: '优品礼品供应商',
+          targetType: 'prize', activityId: 'act-1', targetId: 'p3', targetName: '周年庆幸运转盘 / 定制保温杯', icon: '☕',
+          purpose: 'normal', purposeLabel: PURCHASE_PURPOSE.normal, afterSaleId: '',
+          qty: 50, diffQty: 0, unitPrice: 45,
+          grossAmount: 2250, diffAmount: 0, amount: 2250,
+          status: 'settled', batchIds: ['seed-pb1', 'seed-pb2'], settleId: 'seed-so1', applicant: '运营小张',
+          createdAt: this.todayDate, time: '15:05:00', ts: todayAt(15, 5) }
+      )
+      this.settleOrders.push({
+        id: 'seed-so1', settleNo: 'JSSEED0001', tenantId: 't-star', traceId: '',
+        billId: 'seed-sb1', billNo: 'SBSEED0001', poId: 'seed-po1', poNo: 'POSEED0001',
+        supplier: '优品礼品供应商',
+        targetType: 'prize', activityId: 'act-1', targetId: 'p3',
+        targetName: '周年庆幸运转盘 / 定制保温杯', icon: '☕',
+        purpose: 'normal', purposeLabel: PURCHASE_PURPOSE.normal, afterSaleId: '',
+        qty: 50, diffQty: 0, unitPrice: 45, grossAmount: 2250, diffAmount: 0, amount: 2250,
+        status: 'settled',
+        applicant: '运营小张', applicantId: 'm-star-ops', applyNote: '两批 50 件均已验收入库，按合同单价申请结算',
+        createdAt: this.todayDate, time: '15:40:00', ts: todayAt(15, 40),
+        reviewedAt: `${this.todayDate} 16:20:00`, reviewer: '财务小周',
+        reviewNote: '批次勾稽一致、库存账实相符，同意付款',
+        reconSnapshot: {
+          reconAt: `${this.todayDate} 16:20:00`, reconBy: '财务小周',
+          batchCount: 2, batchQty: 50, batchDiff: 0, batchIds: ['seed-pb1', 'seed-pb2'],
+          afterSale: null, stockRemain: 200, stockTotal: 200,
+          qty: 50, diffQty: 0, unitPrice: 45, amount: 2250, balanced: true
+        }
+      })
 
       // —— 10) 卡券账户与核销种子 ——
       // 10a) 今日正常兑换：满50减10优惠券（30 积分）→ 待核销，用户可出示券码
@@ -4045,8 +4426,15 @@ export const usePlatformStore = defineStore('platform', {
 
       // 审计日志（最新在前）
       this.auditLogs = [
-        { id: 'seed-log-po3', action: 'purchase-apply', actionLabel: '发起采购', orderId: 'seed-po3', operator: '运营(运营小张)', detail: `发起采购【iPhone 16】×2（活动奖品，事由：传说大奖库存不足，国庆加码），待审批`, date: this.todayDate, time: '17:15:00' },
-        { id: 'seed-log-pb3', action: 'purchase-inbound', actionLabel: '验收入库', orderId: 'seed-po2', operator: '运营(仓配小李)', detail: `采购验收入库【限量联名公仔】本批 +6（待收余 4），库存 0→6；供应商/承运：潮玩供应仓`, date: this.todayDate, time: '17:30:00' },
+        { id: 'seed-log-po3', action: 'purchase-apply', actionLabel: '发起采购', orderId: 'seed-po3', operator: '运营(运营小张)', detail: `发起采购【iPhone 16】×2（活动奖品，单价 5999 元/件，供应商 数码直供商，事由：传说大奖库存不足，国庆加码），待审批`, date: this.todayDate, time: '17:15:00' },
+        { id: 'seed-log-pb3', action: 'purchase-inbound', actionLabel: '验收入库', orderId: 'seed-po2', operator: '运营(仓配小李)', detail: `采购验收入库【限量联名公仔】本批到货 6、合格入库 +6（待收余 4），库存 0→6；供应商/承运：潮玩供应仓`, date: this.todayDate, time: '17:30:00' },
+        { id: 'seed-log-so1r', action: 'settle-review', actionLabel: '结算复核通过', orderId: 'seed-so1', operator: '运营(财务小周)', detail: '复核通过供应商结算单 JSSEED0001（账单 SBSEED0001 · 优品礼品供应商）：合格 50 件、验收差异 0 件，实付 2250.00 元，账单已结算；备注：批次勾稽一致、库存账实相符，同意付款', date: this.todayDate, time: '16:20:00' },
+        { id: 'seed-log-so1x', action: 'settle-recon', actionLabel: '结算对账回写', orderId: 'seed-so1', operator: '运营(财务小周)', detail: '结算 JSSEED0001 回写库存对账：采购 POSEED0001 验收批次 2 笔，合格入库 50 件、差异 0 件，与账单逐笔勾稽一致；当前账面 remain=200/stock=200；按采购批次与售后补发口径平账，快照随结算单留存', date: this.todayDate, time: '16:20:00' },
+        { id: 'seed-log-so1a', action: 'settle-apply', actionLabel: '发起供应商结算', orderId: 'seed-so1', operator: '运营(运营小张)', detail: '发起供应商结算单 JSSEED0001：账单 SBSEED0001（采购 POSEED0001 · 优品礼品供应商 ·【周年庆幸运转盘 / 定制保温杯】），合格 50 件 × 45 元，应付 2250.00 元，提交财务复核；备注：两批 50 件均已验收入库，按合同单价申请结算', date: this.todayDate, time: '15:40:00' },
+        { id: 'seed-log-sb1', action: 'supplier-bill', actionLabel: '供应商账单生成', orderId: 'seed-sb1', operator: '运营(仓配小李)', detail: '供应商账单 SBSEED0001 生成（采购 POSEED0001 · 优品礼品供应商 ·【周年庆幸运转盘 / 定制保温杯】）：合格入库 50 件 × 45 元，应付 2250.00 元，待运营发起结算', date: this.todayDate, time: '15:05:00' },
+        { id: 'seed-log-sb2', action: 'supplier-bill', actionLabel: '供应商账单生成', orderId: 'seed-sb2', operator: '运营(仓配小李)', detail: '供应商账单 SBSEED0002 生成（采购 POSEED0004 · 好运礼品厂 ·【盲盒福袋】）：合格入库 28 件 × 38 元，应付 1064.00 元；验收差异 2 件，扣款 76.00 元（到货 30 件），待运营发起结算', date: this.todayDate, time: '14:40:00' },
+        { id: 'seed-log-pb5', action: 'purchase-inbound', actionLabel: '验收入库', orderId: 'seed-po4', operator: '运营(仓配小李)', detail: '采购验收入库【盲盒福袋】本批到货 18、合格入库 +16、验收差异 2 件（运输破损，不入库、结算扣款）（待收余 0），库存 42→58；采购单已全部入库完成；供应商/承运：好运礼品厂', date: this.todayDate, time: '14:40:00' },
+        { id: 'seed-log-pb4', action: 'purchase-inbound', actionLabel: '验收入库', orderId: 'seed-po4', operator: '运营(仓配小李)', detail: '采购验收入库【盲盒福袋】本批到货 12、合格入库 +12（待收余 18），库存 30→42，剩余批次待验收；供应商/承运：好运礼品厂', date: this.todayDate, time: '11:20:00' },
         { id: 'seed-log-po2', action: 'purchase-approve', actionLabel: '采购审批', orderId: 'seed-po2', operator: '运营(财务小周)', detail: '审批通过采购【限量联名公仔】×10（申请人 运营小张，关联售后 seed-as3 缺货补发），等待仓配分批验收入库；备注：售后优先，同意加急采购', date: this.todayDate, time: '17:02:00' },
         { id: 'seed-log-po2a', action: 'purchase-apply', actionLabel: '发起采购', orderId: 'seed-po2', operator: '运营(运营小张)', detail: `发起采购【限量联名公仔】×10（商城商品，事由：补发售后 seed-as3 缺货挂起）；关联待补货售后单 seed-as3，入库后继续补发履约`, date: this.todayDate, time: '16:50:00' },
         { id: 'seed-log-as3', action: 'aftersale-shortage', actionLabel: '缺货待补货', orderId: 'seed-as3', operator: '运营(仓配小李)', detail: '补发【限量联名公仔】库存不足，售后单转待补货（发货单 seed-sp6，账目与库存未变动）；请发起采购，验收入库后从待处理售后继续履约', date: this.todayDate, time: '16:42:10' },
@@ -4081,6 +4469,8 @@ export const usePlatformStore = defineStore('platform', {
       tagStar(this.afterSales)
       tagStar(this.purchaseOrders)
       tagStar(this.inboundBatches)
+      tagStar(this.supplierBills)
+      tagStar(this.settleOrders)
       tagStar(this.coupons)
       tagStar(this.couponLogs)
       tagStar(this.pointRecords)

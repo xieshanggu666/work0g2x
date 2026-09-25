@@ -147,6 +147,31 @@
         <div class="s-num purchase-n">{{ store.dashboard.purchaseInboundQty }}</div>
         <div class="s-lab">累计验收入库</div>
       </div>
+      <div class="stat-card settle">
+        <span class="s-icon">🧾</span>
+        <div class="s-num warn">{{ store.dashboard.billUnsettled }}</div>
+        <div class="s-lab">待结算供应商账单</div>
+      </div>
+      <div class="stat-card settle">
+        <span class="s-icon">💰</span>
+        <div class="s-num" style="color:#82b1ff">{{ store.dashboard.settlePending }}</div>
+        <div class="s-lab">结算待财务复核</div>
+      </div>
+      <div class="stat-card settle">
+        <span class="s-icon">✅</span>
+        <div class="s-num ok">{{ store.dashboard.settleDone }}</div>
+        <div class="s-lab">已结算供应商</div>
+      </div>
+      <div class="stat-card settle">
+        <span class="s-icon">💴</span>
+        <div class="s-num" style="color:#ffd54f">¥{{ Number(store.dashboard.settleAmount || 0).toFixed(0) }}</div>
+        <div class="s-lab">累计结算金额</div>
+      </div>
+      <div class="stat-card settle">
+        <span class="s-icon">🔍</span>
+        <div class="s-num" style="color:#ef9a9a">{{ store.dashboard.acceptDiffQty }}</div>
+        <div class="s-lab">验收差异件数</div>
+      </div>
       <div class="stat-card coupon">
         <span class="s-icon">🎟️</span>
         <div class="s-num coupon-n">{{ store.dashboard.couponIssued }}</div>
@@ -271,6 +296,7 @@ const scopedRecords = computed(() =>
 .stat-card.recon { border-color: rgba(77,182,172,0.35); }
 .stat-card.ship { border-color: rgba(76,175,80,0.35); }
 .stat-card.purchase { border-color: rgba(142,36,170,0.4); }
+.stat-card.settle { border-color: rgba(0,137,123,0.45); }
 .stat-card.coupon { border-color: rgba(171,71,188,0.4); }
 .stat-card.aftersale { border-color: rgba(255,204,128,0.4); }
 .s-num.recon-n { color: #4db6ac; }

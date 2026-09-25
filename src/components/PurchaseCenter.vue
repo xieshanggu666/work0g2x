@@ -91,6 +91,11 @@
           <input v-model.number="form.qty" type="number" min="1" max="9999" placeholder="审批数量（可分批验收入库）" />
         </div>
         <div class="cf-row">
+          <label>单价 / 供应商</label>
+          <input v-model.number="form.unitPrice" type="number" min="0.01" step="0.01" class="w-price" placeholder="单价（元/件）" />
+          <input v-model="form.supplier" class="w-supplier" placeholder="供应商（可选，默认取验收承运方）" />
+        </div>
+        <div class="cf-row">
           <label>采购事由</label>
           <input v-model="form.reason" placeholder="必填，如：周年庆加码补货 / 售后缺货补发履约" />
         </div>
@@ -117,8 +122,8 @@
         </div>
       </div>
       <p class="op-hint">
-        运营按活动奖品/商城商品发起采购 → 具备「采购审批」权限的角色审批 → 仓配按批次验收入库（累计实收不超审批数量）→ 全部入完自动完结；
-        入库即按实收抬升 SKU 的 remain/stock，并追加 append-only 验收批次台账（P5 库存勾稽）。
+        运营按活动奖品/商城商品发起采购（单价用于供应商结算）→ 具备「采购审批」权限的角色审批 → 仓配按批次验收入库（录入到货/合格/差异，累计处理不超审批数量）→ 全部入完自动完结并生成供应商账单；
+        合格入库即抬升 SKU 的 remain/stock（差异件不入库），并追加 append-only 验收批次台账（P5 库存勾稽、供应商账单结算依据）。
       </p>
 
       <div v-if="visibleOrders.length === 0" class="empty">暂无相关采购单</div>
@@ -143,11 +148,12 @@
           <div class="po-reason">事由：{{ o.reason }}</div>
           <div class="po-progress">
             <div class="pp-bar">
-              <i :style="{ width: Math.min(100, (o.inboundQty / o.qty) * 100) + '%' }"></i>
+              <i :style="{ width: Math.min(100, ((o.inboundQty + (o.diffQty || 0)) / o.qty) * 100) + '%' }"></i>
             </div>
-            <span class="pp-num">已验收 <b>{{ o.inboundQty }}</b> / 采购 {{ o.qty }}</span>
+            <span class="pp-num">合格 <b>{{ o.inboundQty }}</b> / 采购 {{ o.qty }}<i v-if="o.diffQty" class="pp-diff">差异 {{ o.diffQty }}</i></span>
             <span class="pp-stock">当前库存 {{ remainOf(o) }}/{{ stockOf(o) }}</span>
           </div>
+          <div class="po-price">单价 ¥{{ Number(o.unitPrice || 0).toFixed(2) }}/件<template v-if="o.supplier"> · {{ o.supplier }}</template></div>
           <div v-if="o.approveNote || o.approver" class="po-approve">
             {{ o.approver ? `审批人 ${o.approver} · ${o.approvedAt}` : '' }}<span v-if="o.approveNote">：{{ o.approveNote }}</span>
           </div>
@@ -169,13 +175,22 @@
         <div v-if="['approved', 'receiving'].includes(o.status)" class="inbound-box">
           <template v-if="store.isOperator && store.can('purchase:inbound')">
             <div class="ib-row">
-              <input v-model.number="batchOf(o).qty" type="number" min="1" :max="o.qty - o.inboundQty"
-                      :placeholder="`本次验收数量（待收 ${o.qty - o.inboundQty}）`" />
+              <input v-model.number="batchOf(o).arrivedQty" type="number" min="1" :max="o.qty - o.inboundQty - (o.diffQty || 0)"
+                      :placeholder="`本批到货数（待收 ${o.qty - o.inboundQty - (o.diffQty || 0)}）`" />
+              <input v-model.number="batchOf(o).qty" type="number" min="1" :max="batchOf(o).arrivedQty || o.qty - o.inboundQty - (o.diffQty || 0)"
+                      placeholder="合格入库数（≤ 到货）" />
+              <select v-model="batchOf(o).diffReason" :disabled="!batchOf(o).arrivedQty || batchOf(o).qty === batchOf(o).arrivedQty">
+                <option value="">无验收差异</option>
+                <option v-for="(r, k) in diffReasons" :key="k" :value="k">{{ r.icon }} {{ r.label }}</option>
+              </select>
               <input v-model="batchOf(o).carrier" placeholder="供应商 / 承运方（可选）" />
               <input v-model="batchOf(o).note" placeholder="验收备注（可选，如：首批抽检合格）" />
-              <button class="btn-inbound" @click="doInbound(o)">📥 验收入库 {{ o.qty - o.inboundQty }} 件内</button>
+              <button class="btn-inbound" @click="doInbound(o)">📥 验收入库</button>
             </div>
-            <span class="ib-tip">支持分批验收：本次数量 ≤ 待收 {{ o.qty - o.inboundQty }}；入满自动完结，库存 remain/stock 按实收同步抬升</span>
+            <span class="ib-tip">
+              支持分批验收：本批到货 ≤ 待收 {{ o.qty - o.inboundQty - (o.diffQty || 0) }}；合格数抬 remain/stock，
+              到货 − 合格 = 验收差异（破损/短缺/质检不合格，不入库、入完按单价扣款）；入满自动完结并生成供应商账单
+            </span>
           </template>
           <span v-else class="waiting">🔒 当前角色无「分批验收入库」权限（物流客服/组织管理员），仅可查看待入库采购单</span>
         </div>
@@ -187,6 +202,8 @@
             <span class="bbi-qty">+{{ b.qty }}</span>
             <span class="bbi-main">
               {{ b.date }} {{ b.time }} · {{ b.inspector }} 验收
+              <em v-if="b.arrivedQty && b.arrivedQty !== b.qty"> · 到货 {{ b.arrivedQty }}、差异 {{ b.diffQty }} 件（{{ diffReasons[b.diffReason]?.label || '其他差异' }}）</em>
+              <em v-else> · 到货 {{ b.arrivedQty || b.qty }}、全部合格</em>
               <em v-if="b.carrier"> · 供应商/承运 {{ b.carrier }}</em>
               <em v-if="b.note"> · {{ b.note }}</em>
             </span>
@@ -200,11 +217,12 @@
 
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { usePlatformStore, PURCHASE_STATUS } from '@/store/platform'
+import { usePlatformStore, PURCHASE_STATUS, ACCEPT_DIFF_REASONS } from '@/store/platform'
 
 const store = usePlatformStore()
 
 const statusMeta = (s) => PURCHASE_STATUS[s] || { label: s }
+const diffReasons = ACCEPT_DIFF_REASONS
 
 const stats = computed(() => ({
   pending: store.dashboard.purchasePending,
@@ -258,7 +276,7 @@ const waitingAfterSales = computed(() =>
 
 // —— 发起采购表单 ——
 const showCreate = ref(false)
-const form = reactive({ targetType: 'goods', prizeKey: '', targetId: '', qty: 1, reason: '', afterSaleId: '' })
+const form = reactive({ targetType: 'goods', prizeKey: '', targetId: '', qty: 1, unitPrice: null, supplier: '', reason: '', afterSaleId: '' })
 const linkedAfterSale = computed(() =>
   form.afterSaleId ? store.afterSales.find((a) => a.id === form.afterSaleId) : null)
 function pickType(t) {
@@ -268,7 +286,7 @@ function pickType(t) {
 }
 function resetForm() {
   form.targetType = 'goods'; form.prizeKey = ''; form.targetId = ''
-  form.qty = 1; form.reason = ''; form.afterSaleId = ''
+  form.qty = 1; form.unitPrice = null; form.supplier = ''; form.reason = ''; form.afterSaleId = ''
 }
 // 从待补货售后单预填采购表单（一键发起补货采购）
 function newPoForAfterSale(a) {
@@ -287,6 +305,8 @@ function submitPo() {
     activityId: form.targetType === 'prize' ? (form.prizeKey || '').split('::')[0] : null,
     targetId: form.targetType === 'prize' ? (form.prizeKey || '').split('::')[1] : form.targetId,
     qty: form.qty,
+    unitPrice: form.unitPrice,
+    supplier: form.supplier,
     reason: form.reason,
     afterSaleId: form.afterSaleId || undefined
   }
@@ -314,11 +334,22 @@ function cancel(o) {
 }
 
 const batches = reactive({})
-const batchOf = (o) => (batches[o.id] || (batches[o.id] = { qty: o.qty - o.inboundQty, carrier: '', note: '' }))
+const batchOf = (o) =>
+  batches[o.id] || (batches[o.id] = {
+    arrivedQty: o.qty - o.inboundQty - (o.diffQty || 0),
+    qty: o.qty - o.inboundQty - (o.diffQty || 0),
+    diffReason: '',
+    carrier: '',
+    note: ''
+  })
 function doInbound(o) {
   const f = batchOf(o)
-  if (store.inboundPurchase(o.id, { qty: f.qty, carrier: f.carrier, note: f.note })) {
-    f.qty = o.qty - o.inboundQty
+  const payload = { qty: f.qty, arrivedQty: f.arrivedQty, diffReason: f.diffReason, carrier: f.carrier, note: f.note }
+  if (store.inboundPurchase(o.id, payload)) {
+    const slot = o.qty - o.inboundQty - (o.diffQty || 0)
+    f.arrivedQty = slot
+    f.qty = slot
+    f.diffReason = ''
     f.carrier = ''
     f.note = ''
   }
@@ -429,6 +460,8 @@ function resumeAfterSale(a) {
   flex: 1; background: #0c1730; border: 1px solid rgba(120,160,220,0.2); color: #dbe4f3;
   border-radius: 8px; padding: 8px 11px; font-size: 12px; font-family: inherit;
 }
+.cf-row .w-price { flex: 0 0 150px; }
+.cf-row .w-supplier { flex: 1.4; }
 .seg { display: flex; gap: 6px; }
 .seg button {
   background: #13233f; border: 1px solid rgba(120,160,220,0.2); color: #aebadd;
@@ -480,7 +513,9 @@ function resumeAfterSale(a) {
 .pp-bar i { display: block; height: 100%; background: linear-gradient(90deg,#8e24aa,#ce93d8); border-radius: 4px; }
 .pp-num { font-size: 11px; color: #aebadd; white-space: nowrap; }
 .pp-num b { color: #ce93d8; }
+.pp-diff { font-style: normal; color: #ef9a9a; margin-left: 6px; }
 .pp-stock { font-size: 11px; color: #7e97c2; white-space: nowrap; }
+.po-price { font-size: 11px; color: #7e97c2; }
 .po-approve { font-size: 11px; color: #7e97c2; }
 
 .po-actions { margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -503,10 +538,11 @@ function resumeAfterSale(a) {
   border-radius: 9px; padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
 }
 .ib-row { display: flex; gap: 8px; flex-wrap: wrap; }
-.ib-row input {
+.ib-row input, .ib-row select {
   flex: 1; min-width: 150px; background: #0c1730; border: 1px solid rgba(120,160,220,0.2); color: #dbe4f3;
   border-radius: 8px; padding: 8px 11px; font-size: 12px;
 }
+.ib-row select:disabled { color: #6f84ab; opacity: 0.7; }
 .btn-inbound {
   background: linear-gradient(135deg,#1e88e5,#00897b); color: #fff; border: none;
   border-radius: 8px; padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;

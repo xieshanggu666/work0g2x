@@ -19,24 +19,39 @@ const g6 = () => s.goods.find((g) => g.id === g6id)
 const g6id = 'g6'
 const p1 = () => s.activities.find((a) => a.id === 'act-1').prizes.find((p) => p.id === 'p1')
 
-console.log('— 种子：采购三态（待审批 iPhone / 验收中公仔 / 已完成保温杯）+ 缺货挂起售后 —')
-assert(s.purchaseOrders.length === 3, `采购单种子 3 张（实际 ${s.purchaseOrders.length}）`)
+console.log('— 种子：采购四态（待审批 iPhone / 验收中公仔 / 已完成保温杯 / 含差异盲盒）+ 缺货挂起售后 + 供应商账单 —')
+assert(s.purchaseOrders.length === 4, `采购单种子 4 张（实际 ${s.purchaseOrders.length}）`)
 const po1 = s.purchaseOrders.find((o) => o.id === 'seed-po1')
 const po2 = s.purchaseOrders.find((o) => o.id === 'seed-po2')
 const po3 = s.purchaseOrders.find((o) => o.id === 'seed-po3')
+const po4 = s.purchaseOrders.find((o) => o.id === 'seed-po4')
 assert(po1.status === 'received' && po1.inboundQty === 50 && po1.batches.length === 2, '保温杯采购：已完成，两批 30+20')
 assert(po2.status === 'receiving' && po2.inboundQty === 6 && po2.qty === 10 && po2.afterSaleId === 'seed-as3',
   '公仔采购：分批验收中 6/10，关联缺货售后单')
 assert(po3.status === 'pending' && po3.targetType === 'prize', 'iPhone 采购：待审批（活动奖品）')
-assert(s.inboundBatches.length === 3, '验收批次台账 3 条（append-only）')
+assert(po4.status === 'received' && po4.inboundQty === 28 && po4.diffQty === 2 && po4.qty === 30,
+  '盲盒采购：已入完，合格 28 + 验收差异 2（运输破损）')
+assert(s.inboundBatches.length === 5, '验收批次台账 5 条（append-only）')
 assert(s.pendingPurchaseCount === 1 && s.pendingInboundCount === 1, '采购角标：待审批 1 / 待入库 1')
 const as3 = s.afterSales.find((a) => a.id === 'seed-as3')
 assert(as3.status === 'waiting_stock' && as3.type === 'reship', '种子售后单：公仔补发缺货挂起「待补货」')
 assert(s.waitingStockAfterSaleCount === 1, '待补货售后角标=1')
-// 库存口径：保温杯 150→200 且 remain=200（入库抬升 stock）；公仔 stock 8、remain 6
+// 库存口径：保温杯 150→200 且 remain=200（入库抬升 stock）；公仔 stock 8、remain 6；盲盒 30→58（差异 2 件不入库）
 const p3 = s.activities.find((a) => a.id === 'act-1').prizes.find((x) => x.id === 'p3')
 assert(p3.stock === 200 && p3.remain === 200, '保温杯库存随采购入库抬升（stock/remain = 200）')
 assert(g6().stock === 8 && g6().remain === 6, '公仔首批入库 6：stock 2→8、remain 0→6（剩 4 待收）')
+const g4seed = s.goods.find((g) => g.id === 'g4')
+assert(g4seed.stock === 58 && g4seed.remain === 57, '盲盒合格入库 28：stock 30→58、remain 29→57（含风控预占 1；破损 2 件不入库）')
+// 供应商账单与结算单种子：保温杯已结算闭环；盲盒待结算（含差异扣款）
+assert(s.supplierBills.length === 2 && s.settleOrders.length === 1, '供应商账单 2 张 + 结算单 1 张种子')
+const sb1 = s.supplierBills.find((b) => b.id === 'seed-sb1')
+const sb2 = s.supplierBills.find((b) => b.id === 'seed-sb2')
+assert(sb1.status === 'settled' && sb1.amount === 2250 && sb1.qty === 50, '保温杯账单已结算：50 × 45 = 2250 元')
+assert(sb2.status === 'unsettled' && sb2.amount === 1064 && sb2.diffQty === 2 && sb2.diffAmount === 76,
+  '盲盒账单待结算：合格 28 × 38 = 1064 元（差异 2 件扣款 76 元）')
+const so1 = s.settleOrders.find((o) => o.id === 'seed-so1')
+assert(so1.status === 'settled' && so1.reconSnapshot && so1.reconSnapshot.batchQty === 50 && so1.reconSnapshot.balanced,
+  '种子结算单已复核：留存库存对账回写快照（2 批 50 件勾稽一致）')
 
 console.log('— RBAC：运营发起 / 财务审批 / 仓配验收，三权分立 —')
 s.loginAsCustomer()
@@ -55,8 +70,10 @@ assert(s.inboundPurchase(po2.id, { qty: 1 }) === null, '财务无验收权限，
 
 console.log('— 审批 / 驳回 / 撤销状态机 —')
 s.loginAsMember('m-star-ops')
-const myPo = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 3, reason: '运营补货测试' })
+const myPo = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 3, unitPrice: 89, reason: '运营补货测试' })
 assert(!!myPo && myPo.status === 'pending', '运营发起采购成功（待审批）')
+assert(s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 2, reason: '缺单价' }) === null,
+  '未填预估单价发起采购被拦截')
 // 仓配不能撤销别人的单
 s.loginAsMember('m-star-ship')
 assert(s.cancelPurchaseOrder(myPo.id) === false, '非发起人/管理员撤销被拦截')
@@ -65,7 +82,7 @@ s.loginAsMember('m-star-ops')
 assert(s.cancelPurchaseOrder(myPo.id) === true && myPo.status === 'canceled', '发起人审批前撤销成功')
 assert(s.cancelPurchaseOrder(myPo.id) === false, '已撤销单重复撤销被状态机拦截')
 // 财务驳回
-const rejectPo = s.createPurchaseOrder({ targetType: 'prize', activityId: 'act-1', targetId: 'p1', qty: 1, reason: '应被驳回' })
+const rejectPo = s.createPurchaseOrder({ targetType: 'prize', activityId: 'act-1', targetId: 'p1', qty: 1, unitPrice: 5999, reason: '应被驳回' })
 s.loginAsMember('m-star-fin')
 assert(s.reviewPurchaseOrder(rejectPo.id, false, '预算不足') === true, '财务驳回采购')
 assert(rejectPo.status === 'rejected' && rejectPo.approver === '财务小周', '采购单 → 已驳回（记录审批人）')
@@ -75,7 +92,7 @@ assert(p1().stock === stockBeforeReject, '驳回不动库存（stock/remain 均�
 
 console.log('— 全链路：发起 → 审批 → 分批验收入库 → 自动完结 —')
 s.loginAsMember('m-star-ops')
-const po = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 5, reason: '商城补货' })
+const po = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 5, unitPrice: 20, supplier: '测试供应商', reason: '商城补货' })
 const g6Before = g6().remain
 const g6StockBefore = g6().stock
 s.loginAsMember('m-star-fin')
@@ -97,6 +114,11 @@ assert(g6().remain === g6Before + 5 && g6().stock === g6StockBefore + 5, '累计
 assert(!!po.receivedAt, '完结记录入库完成时间')
 assert(s.inboundPurchase(po.id, { qty: 1 }) === null, '已完成采购单不可再验收（幂等）')
 assert(s.inboundBatches.filter((b) => b.poId === po.id).length === 2, '两批验收均写入 append-only 台账')
+// 入完自动生成供应商账单（合格 5 × 单价 20 = 100 元，待结算）
+const autoBill = s.supplierBills.find((b) => b.poId === po.id)
+assert(!!autoBill && autoBill.status === 'unsettled' && autoBill.qty === 5 && autoBill.amount === 100,
+  `采购入完自动生成供应商账单（实际 ${autoBill ? `${autoBill.qty} 件 / ${autoBill.amount} 元` : '无'}）`)
+assert(autoBill.supplier === '测试供应商' && autoBill.diffQty === 0, '账单取采购单供应商、无验收差异')
 
 console.log('— 缺货补发：待补货售后 → 采购入库 → 从待处理售后继续履约 —')
 // seed-as3 公仔：首批 6 件入库后 remain=6 已足（本流程前又入了 5 件，余量充足）
@@ -135,6 +157,9 @@ assert(s.activeTenantId === 't-star' && s.inboundPurchase(po2.id, { qty: 4 }) !=
   '回到星河上下文后仓配可继续验收本租户采购（剩余 4 件入满）')
 assert(po2.status === 'received' && po2.inboundQty === 10, '种子公仔采购入满完结（6 + 4）')
 assert(s.inboundPurchase(po2.id, { qty: 1 }) === null, '完结后重复验收拦截')
+const po2Bill = s.supplierBills.find((b) => b.poId === 'seed-po2')
+assert(!!po2Bill && po2Bill.qty === 10 && po2Bill.amount === 890 && po2Bill.status === 'unsettled',
+  '公仔采购入完自动出账（10 × 89 = 890 元，待结算）')
 
 console.log('— 审计留痕：采购全链路动作齐全 —')
 ;['purchase-apply', 'purchase-approve', 'purchase-reject', 'purchase-cancel', 'purchase-inbound',

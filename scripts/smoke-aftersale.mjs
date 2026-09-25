@@ -156,7 +156,7 @@ assert(s.reviewAfterSale(apply4.id, false) === false, '待补货单不可驳回�
 // 走采购链路补货：从待补货售后单一键发起（采购单回指售后单，入完后从待处理售后继续履约）
 const po = s.createPurchaseOrder({
   targetType: apply4.targetType, targetId: apply4.targetId, activityId: apply4.activityId,
-  qty: 10, reason: '缺货补发采购', afterSaleId: apply4.id
+  qty: 10, unitPrice: 25, reason: '缺货补发采购', afterSaleId: apply4.id
 })
 assert(!!po && po.afterSaleId === apply4.id, '可从待处理售后单发起采购（采购单关联售后）')
 assert(s.reviewPurchaseOrder(po.id, true, '售后优先') === true, '采购审批通过')
