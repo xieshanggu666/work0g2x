@@ -40,6 +40,12 @@ export class PurchaseService {
     if (qty > 9999) throw new BizError('BAD_FORM', '单笔采购数量不超过 9999')
     const reason = (form.reason || '').trim()
     if (!reason) throw new BizError('BAD_FORM', '请填写采购事由')
+    // 供应商与协议单价（供应商结算口径：按实收合格量 × 单价）
+    const supplierName = (form.supplierName || '').trim()
+    if (!supplierName) throw new BizError('BAD_FORM', '请填写供应商名称（供应商结算依据）')
+    const unitPrice = Math.round(Number(form.unitPrice) * 100) / 100
+    if (!(unitPrice > 0)) throw new BizError('BAD_FORM', '请填写正确的协议单价（>0）')
+    if (unitPrice > 1000000) throw new BizError('BAD_FORM', '单价异常，请核对后再提交')
 
     // 关联待补货售后单（缺货补发履约链路）
     let linked = null
@@ -66,6 +72,8 @@ export class PurchaseService {
       targetName: t.targetName,
       icon: t.icon,
       qty, inboundQty: 0, status: 'pending',
+      supplierName, unitPrice,
+      shortQty: 0, rejectedQty: 0, settledBillId: '',
       purpose: linked ? 'aftersale' : 'normal',
       purposeLabel: linked ? '售后缺货补发履约' : '日常补货',
       afterSaleId: linked ? linked.id : '',
@@ -77,7 +85,7 @@ export class PurchaseService {
     }
     await this.k.commit([{ type: 'insert', table: 'purchaseOrders', row: po }])
     await this.audit.log('purchase-apply', po.id,
-      `发起采购【${t.targetName}】×${qty}（${targetType === 'prize' ? '活动奖品' : '商城商品'}，事由：${reason}）` +
+      `发起采购【${t.targetName}】×${qty}（${targetType === 'prize' ? '活动奖品' : '商城商品'}，供应商：${supplierName}，协议单价 ${unitPrice} 元，事由：${reason}）` +
       (linked ? `；关联待补货售后单 ${linked.id}，入库后继续补发履约` : ''),
       { tenantId: ctx.tenantId, ctx, traceId })
     return po
@@ -127,33 +135,44 @@ export class PurchaseService {
   }
 
   async _inbound(poId, form, ctx) {
-    const po = this.requireOrder(poId)
-    if (!['approved', 'receiving'].includes(po.status)) {
+    const po0 = this.requireOrder(poId)
+    if (!['approved', 'receiving'].includes(po0.status)) {
       throw new BizError('STATE_DENIED', '仅已审批 / 验收中的采购单可验收入库', 409)
     }
     const qty = Math.floor(Number(form.qty) || 0)
-    if (qty <= 0) throw new BizError('BAD_FORM', '本次验收数量需为正整数')
-    const remain = po.qty - po.inboundQty
-    if (qty > remain) {
-      throw new BizError('OVER_INBOUND', `本次验收 ${qty} 超过待收数量 ${remain}（审批 ${po.qty}，已收 ${po.inboundQty}）`, 409)
+    if (qty <= 0) throw new BizError('BAD_FORM', '本批合格入库数量需为正整数')
+    const toReceive = po0.qty - po0.inboundQty
+    if (qty > toReceive) {
+      throw new BizError('OVER_INBOUND', `本次合格入库 ${qty} 超过待收数量 ${toReceive}（审批 ${po0.qty}，已收 ${po0.inboundQty}）`, 409)
     }
-    const t = this.targetOf(po.targetType, po.activityId, po.targetId)
-    const target = this.inventory.targetOf(po.targetType, po.activityId, po.targetId)
+    // 到货量默认=合格量；到货−合格=验退拒收（不入库）；closeShortage 剩余待收按短少结案
+    const deliveredRaw = form.deliveredQty === undefined || form.deliveredQty === null || form.deliveredQty === ''
+      ? qty : Math.floor(Number(form.deliveredQty) || 0)
+    if (deliveredRaw < qty) {
+      throw new BizError('BAD_FORM', `本批到货量 ${deliveredRaw} 不能少于合格入库量 ${qty}（不合格部分请计入验退拒收）`)
+    }
+    const rejectedQty = deliveredRaw - qty
+    const closeShortage = !!form.closeShortage && qty < toReceive
+    const shortQty = closeShortage ? toReceive - qty : 0
+    const t = this.targetOf(po0.targetType, po0.activityId, po0.targetId)
+    const target = this.inventory.targetOf(po0.targetType, po0.activityId, po0.targetId)
     const traceId = this.k.newTraceId()
     const batchId = genId('pb')
     const before = t.row.remain
     // 幂等：同一批次 id 的库存抬升只生效一次（崩溃重放/重复提交安全）
     await this.inventory.receive(target, qty, `po-inbound:${batchId}`)
-    const after = this.k.state.purchaseOrders.find((x) => x.id === po.id)
-    const done = after.inboundQty + qty >= po.qty
+    const after = this.k.state.purchaseOrders.find((x) => x.id === po0.id)
+    const filled = after.inboundQty + qty >= po0.qty
+    const status = filled ? 'received' : (closeShortage ? 'diff_closed' : 'receiving')
     const batch = {
-      id: batchId, poId: po.id, poNo: po.poNo,
-      tenantId: po.tenantId, traceId,
-      targetType: po.targetType, activityId: po.activityId, targetId: po.targetId,
-      targetName: po.targetName, icon: po.icon,
-      qty, remainBefore: before, remainAfter: before + qty,
+      id: batchId, poId: po0.id, poNo: po0.poNo,
+      tenantId: po0.tenantId, traceId,
+      targetType: po0.targetType, activityId: po0.activityId, targetId: po0.targetId,
+      targetName: po0.targetName, icon: po0.icon,
+      qty, deliveredQty: deliveredRaw, rejectedQty, shortQty,
+      remainBefore: before, remainAfter: before + qty,
       stockBefore: t.row.stock - qty, stockAfter: t.row.stock,
-      carrier: (form.carrier || '').trim(),
+      carrier: (form.carrier || '').trim() || po0.supplierName,
       inspector: ctx.name, acceptedInbound: true,
       date: this.k.todayDate(), time: this.k.nowTime(), ts: this.k.nowTs(),
       note: (form.note || '').trim()
@@ -161,30 +180,67 @@ export class PurchaseService {
     const row = {
       ...after,
       inboundQty: after.inboundQty + qty,
-      status: done ? 'received' : 'receiving',
-      receivedAt: done ? `${this.k.todayDate()} ${this.k.nowTime()}` : after.receivedAt,
+      shortQty: (after.shortQty || 0) + shortQty,
+      rejectedQty: (after.rejectedQty || 0) + rejectedQty,
+      status,
+      receivedAt: filled ? `${this.k.todayDate()} ${this.k.nowTime()}` : after.receivedAt,
       batches: [...(after.batches || []), batchId]
     }
-    await this.k.commit([
+    const events = [
       { type: 'insert', table: 'inboundBatches', row: batch },
       { type: 'upsert', table: 'purchaseOrders', row }
-    ])
-    await this.audit.log('purchase-inbound', po.id,
-      `采购验收入库【${po.targetName}】本批 +${qty}（待收余 ${po.qty - row.inboundQty}），库存 ${before}→${before + qty}` +
-      (done ? '；采购单已全部入库完成' : '，剩余批次待验收') +
-      (batch.carrier ? `；供应商/承运：${batch.carrier}` : ''),
-      { tenantId: po.tenantId, ctx, traceId })
+    ]
+    const diffs = []
+    const makeDiff = (type, dq, reason) => ({
+      id: genId('ad'), type, poId: po0.id, poNo: po0.poNo, batchId,
+      tenantId: po0.tenantId, traceId,
+      targetType: po0.targetType, activityId: po0.activityId, targetId: po0.targetId,
+      targetName: po0.targetName, icon: po0.icon,
+      qty: dq, orderQty: po0.qty, inboundQtyAfter: row.inboundQty, supplierName: po0.supplierName,
+      reason, inspector: ctx.name,
+      date: this.k.todayDate(), time: this.k.nowTime(), ts: this.k.nowTs()
+    })
+    if (rejectedQty > 0) {
+      const d = makeDiff('rejected', rejectedQty,
+        (form.rejectReason || form.note || '').trim() || '到货破损/不合格，验退拒收（不入库）')
+      diffs.push(d)
+      events.push({ type: 'insert', table: 'acceptDiffs', row: d })
+    }
+    if (shortQty > 0) {
+      const d = makeDiff('short', shortQty,
+        (form.shortReason || '').trim() || '供应商到货短少且确认不再补发，按验收差异结案')
+      diffs.push(d)
+      events.push({ type: 'insert', table: 'acceptDiffs', row: d })
+    }
+    await this.k.commit(events)
+    const diffText = rejectedQty
+      ? `；本批到货 ${deliveredRaw}，验退拒收 ${rejectedQty}（不入库，已登记验收差异）` : ''
+    await this.audit.log('purchase-inbound', po0.id,
+      `采购验收入库【${po0.targetName}】本批合格 +${qty}（待收余 ${Math.max(po0.qty - row.inboundQty, 0)}），库存 ${before}→${before + qty}` +
+      (filled ? '；采购单已全部入库完成' : closeShortage ? `；供应商确认短少 ${shortQty} 件不再补发，采购单按验收差异结案` : '，剩余批次待验收') +
+      (batch.carrier ? `；供应商/承运：${batch.carrier}` : '') + diffText,
+      { tenantId: po0.tenantId, ctx, traceId })
+    if (shortQty > 0) {
+      await this.audit.log('accept-diff-short', po0.id,
+        `验收差异【到货短少】${po0.targetName} ×${shortQty}（采购 ${po0.poNo} 审批 ${po0.qty}、实收合格 ${row.inboundQty}）：供应商 ${po0.supplierName} 确认不再补发，差异转供应商结算扣款`,
+        { tenantId: po0.tenantId, ctx, traceId })
+    }
+    if (rejectedQty > 0) {
+      await this.audit.log('accept-diff-reject', po0.id,
+        `验收差异【验退拒收】${po0.targetName} ×${rejectedQty}（采购 ${po0.poNo} 批次 ${batchId}，到货 ${deliveredRaw} / 合格 ${qty}）：不合格部分不入库，差异转供应商结算`,
+        { tenantId: po0.tenantId, ctx, traceId })
+    }
 
     // 缺货补发联动：全部入完且关联待补货售后时，提示从待处理售后继续履约
     let resumeReady = null
-    if (done && po.afterSaleId) {
-      resumeReady = this.k.state.afterSales.find((a) => a.id === po.afterSaleId && a.status === 'waiting_stock') || null
+    if (filled && po0.afterSaleId) {
+      resumeReady = this.k.state.afterSales.find((a) => a.id === po0.afterSaleId && a.status === 'waiting_stock') || null
       if (resumeReady) {
         await this.audit.log('aftersale-resume-ready', resumeReady.id,
-          `采购 ${po.poNo} 验收入库完成，待补货售后单【${resumeReady.targetName}】库存已就绪，可从待处理售后继续补发履约`,
-          { tenantId: po.tenantId, ctx, traceId })
+          `采购 ${po0.poNo} 验收入库完成，待补货售后单【${resumeReady.targetName}】库存已就绪，可从待处理售后继续补发履约`,
+          { tenantId: po0.tenantId, ctx, traceId })
       }
     }
-    return { batch, order: row, resumeReady }
+    return { batch, order: row, diffs, resumeReady }
   }
 }

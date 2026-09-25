@@ -147,6 +147,26 @@
         <div class="s-num purchase-n">{{ store.dashboard.purchaseInboundQty }}</div>
         <div class="s-lab">累计验收入库</div>
       </div>
+      <div class="stat-card purchase">
+        <span class="s-icon">⚠️</span>
+        <div class="s-num" style="color:#ef9a9a">{{ store.dashboard.purchaseDiffClosed }}</div>
+        <div class="s-lab">验收差异结案</div>
+      </div>
+      <div class="stat-card purchase">
+        <span class="s-icon">🧾</span>
+        <div class="s-num" style="color:#ffb74d">{{ store.dashboard.supplierReviewing + store.dashboard.supplierApproved }}</div>
+        <div class="s-lab">账单待复核/待结算</div>
+      </div>
+      <div class="stat-card purchase">
+        <span class="s-icon">💰</span>
+        <div class="s-num ok">{{ store.dashboard.supplierSettled }}</div>
+        <div class="s-lab">已结算供应商账单</div>
+      </div>
+      <div class="stat-card purchase">
+        <span class="s-icon">💴</span>
+        <div class="s-num" style="color:#ffd54f">¥{{ Number(store.dashboard.supplierPaid || 0).toFixed(0) }}</div>
+        <div class="s-lab">累计已付供应商</div>
+      </div>
       <div class="stat-card coupon">
         <span class="s-icon">🎟️</span>
         <div class="s-num coupon-n">{{ store.dashboard.couponIssued }}</div>

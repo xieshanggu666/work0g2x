@@ -11,6 +11,7 @@ const PERMS = {
   reviewRisk: 'risk:review', ruleRisk: 'risk:rule',
   shipSend: 'ship:send', shipTrace: 'ship:trace', aftersaleReview: 'aftersale:review',
   purchaseApply: 'purchase:apply', purchaseApprove: 'purchase:approve', purchaseInbound: 'purchase:inbound',
+  supplierBill: 'supplier:bill', supplierReview: 'supplier:review', supplierSettle: 'supplier:settle',
   couponRedeem: 'coupon:redeem',
   reconRun: 'recon:run', reconReview: 'recon:review', reconCompensate: 'recon:compensate',
   activityManage: 'activity:manage'
@@ -150,7 +151,21 @@ async function route(app, req, res, json) {
     const list = app.k.state.purchaseOrders
       .filter((o) => (o.tenantId || 't-star') === tid())
       .sort((a, b) => b.ts - a.ts)
-    return json(res, 200, { purchases: list, batches: app.k.state.inboundBatches.filter((b) => (b.tenantId || 't-star') === tid()) })
+    return json(res, 200, {
+      purchases: list,
+      batches: app.k.state.inboundBatches.filter((b) => (b.tenantId || 't-star') === tid()),
+      acceptDiffs: app.k.state.acceptDiffs.filter((b) => (b.tenantId || 't-star') === tid())
+    })
+  }
+  if (method === 'GET' && p === '/api/supplier/bills') {
+    return json(res, 200, {
+      bills: app.k.state.supplierBills
+        .filter((b) => (b.tenantId || 't-star') === tid())
+        .sort((a, b) => b.ts - a.ts)
+    })
+  }
+  if (method === 'GET' && p === '/api/supplier/recon') {
+    return json(res, 200, { recon: app.supplier.computeRecon(tid()) })
   }
   if (method === 'GET' && p === '/api/risk/orders') {
     const list = app.k.state.riskOrders
@@ -284,6 +299,38 @@ async function route(app, req, res, json) {
     const r = await app.purchase.inbound(body.purchaseId, body, session)
     return json(res, 200, { ok: true, ...r })
   }
+  if (method === 'POST' && p === '/api/supplier/bills/create') {
+    await requireStaffPerm(app, session, PERMS.supplierBill)
+    const po = app.k.state.purchaseOrders.find((x) => x.id === body.purchaseId)
+    if (!po) throw new BizError('PO_NOT_FOUND', '采购单不存在', 404)
+    await app.auth.requireSameTenant(session, po.tenantId, 'supplier')
+    const bill = await app.supplier.createBill(body.purchaseId, body, session)
+    return json(res, 200, { ok: true, bill })
+  }
+  if (method === 'POST' && p === '/api/supplier/bills/submit') {
+    await requireStaffPerm(app, session, PERMS.supplierBill)
+    const cur = app.supplier.requireBill(body.billId)
+    if (!cur) throw new BizError('BILL_NOT_FOUND', '供应商账单不存在', 404)
+    await app.auth.requireSameTenant(session, cur.tenantId, 'supplier')
+    const bill = await app.supplier.submitBill(body.billId, body, session)
+    return json(res, 200, { ok: true, bill })
+  }
+  if (method === 'POST' && p === '/api/supplier/bills/review') {
+    await requireStaffPerm(app, session, PERMS.supplierReview)
+    const cur = app.supplier.requireBill(body.billId)
+    if (!cur) throw new BizError('BILL_NOT_FOUND', '供应商账单不存在', 404)
+    await app.auth.requireSameTenant(session, cur.tenantId, 'supplier')
+    const bill = await app.supplier.reviewBill(body.billId, !!body.approve, body.note || '', session)
+    return json(res, 200, { ok: true, bill })
+  }
+  if (method === 'POST' && p === '/api/supplier/bills/settle') {
+    await requireStaffPerm(app, session, PERMS.supplierSettle)
+    const cur = app.supplier.requireBill(body.billId)
+    if (!cur) throw new BizError('BILL_NOT_FOUND', '供应商账单不存在', 404)
+    await app.auth.requireSameTenant(session, cur.tenantId, 'supplier')
+    const bill = await app.supplier.settleBill(body.billId, body.note || '', session)
+    return json(res, 200, { ok: true, bill })
+  }
   if (method === 'POST' && p === '/api/coupons/redeem') {
     await requireStaffPerm(app, session, PERMS.couponRedeem)
     const r = await app.coupons.redeem(body.code, session, body)
@@ -405,7 +452,14 @@ function dashboard(app, tid) {
     purchasePending: app.k.state.purchaseOrders.filter((o) => inT(o) && o.status === 'pending').length,
     purchaseToInbound: app.k.state.purchaseOrders.filter((o) => inT(o) && ['approved', 'receiving'].includes(o.status)).length,
     purchaseReceived: app.k.state.purchaseOrders.filter((o) => inT(o) && o.status === 'received').length,
+    purchaseDiffClosed: app.k.state.purchaseOrders.filter((o) => inT(o) && o.status === 'diff_closed').length,
     purchaseInboundQty: app.k.state.inboundBatches.filter((b) => inT(b)).reduce((n, b) => n + (b.qty || 0), 0),
+    acceptDiffCount: app.k.state.acceptDiffs.filter((d) => inT(d)).length,
+    supplierBills: app.k.state.supplierBills.filter((b) => inT(b)).length,
+    supplierReviewing: app.k.state.supplierBills.filter((b) => inT(b) && b.status === 'reviewing').length,
+    supplierApproved: app.k.state.supplierBills.filter((b) => inT(b) && b.status === 'approved').length,
+    supplierSettled: app.k.state.supplierBills.filter((b) => inT(b) && b.status === 'settled').length,
+    supplierPaid: app.k.state.supplierBills.filter((b) => inT(b) && b.status === 'settled').reduce((n, b) => n + (b.payableAmount || 0), 0),
     reconBills: app.k.state.reconBills.filter((b) => inT(b)).length,
     reconOpen: app.k.state.reconBills.filter((b) => inT(b) && ['pending', 'reviewed'].includes(b.status)).length
   }

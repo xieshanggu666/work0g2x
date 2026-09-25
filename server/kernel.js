@@ -24,6 +24,7 @@ export class Kernel {
       coupons: [], couponLogs: [],
       shipments: [], afterSales: [],
       purchaseOrders: [], inboundBatches: [],
+      acceptDiffs: [], supplierBills: [],
       reconBills: [], stockAdjustments: [],
       auditLogs: [],
       migrations: [],      // 历史台账迁移批次（manifest；幂等判重 + 校验和留痕）

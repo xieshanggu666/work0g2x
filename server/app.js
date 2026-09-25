@@ -9,6 +9,7 @@ import { InventoryService } from './services/inventory.js'
 import { CouponService } from './services/coupon.js'
 import { ShipService } from './services/ship.js'
 import { PurchaseService } from './services/purchase.js'
+import { SupplierService } from './services/supplier.js'
 import { TaskService } from './services/task.js'
 import { RiskService, makeDefaultRules } from './services/risk.js'
 import { TradeService } from './services/trade.js'
@@ -28,13 +29,14 @@ export async function createApp(options = {}) {
   const coupons = new CouponService(k, audit)
   const ship = new ShipService(k, audit, points, inventory)
   const purchase = new PurchaseService(k, audit, inventory, locks)
+  const supplier = new SupplierService({ k, audit, locks })
   const tasks = new TaskService(k, audit, points)
   const risk = new RiskService({ k, audit, points, inventory, coupons, ship, tasks })
   const trade = new TradeService({ k, locks, audit, points, inventory, coupons, ship, tasks, risk })
   const recon = new ReconService({ k, audit, points, coupons })
   const migration = new MigrationService({ k, audit })
 
-  const app = { k, locks, auth, audit, points, inventory, coupons, ship, purchase, tasks, risk, trade, recon, migration }
+  const app = { k, locks, auth, audit, points, inventory, coupons, ship, purchase, supplier, tasks, risk, trade, recon, migration }
 
   // 空库引导：写入原生种子（以 upsert/insert 事件入 WAL，重启自动恢复）
   const fresh = k.state.tenants.length === 0 && k.state.activities.length === 0

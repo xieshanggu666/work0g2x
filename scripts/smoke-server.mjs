@@ -407,7 +407,7 @@ async function testPurchase() {
   assert(app.auth.can(fin, 'purchase:approve') && !app.auth.can(fin, 'purchase:inbound'), '财务：可审批，不可验收')
 
   // 发起 → 审批 → 首批验收（30 件）→ 次批入满（20 件）
-  const po = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 50, reason: '补货' }, ops)
+  const po = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 50, reason: '补货', supplierName: '供应商A', unitPrice: 12 }, ops)
   assert(po.status === 'pending', '采购单创建：待审批')
   let bad = null
   try { await app.auth.requirePerm(ops, 'purchase:approve', 'purchase', '采购审批') } catch (e) { bad = e }
@@ -449,7 +449,7 @@ async function testPurchase() {
   assert(waiting.status === 'waiting_stock', '补发缺货 → 售后单挂起待补货（不落账）')
   // 从待补货售后发起采购
   const po2 = await app.purchase.createOrder(
-    { targetType: 'goods', targetId: 'g3', qty: 10, reason: '补发采购', afterSaleId: asRow.id }, ops)
+    { targetType: 'goods', targetId: 'g3', qty: 10, reason: '补发采购', afterSaleId: asRow.id, supplierName: '供应商A', unitPrice: 12 }, ops)
   assert(po2.afterSaleId === asRow.id && po2.purpose === 'aftersale', '采购单关联待补货售后')
   await app.purchase.reviewOrder(po2.id, true, '加急', fin)
   const inb = await app.purchase.inbound(po2.id, { qty: 10 }, shipStaff)
@@ -487,7 +487,7 @@ async function testPurchaseConcurrency() {
   const stock0 = g.stock
 
   // 场景 1：两笔并发验收各 6（合计 12 > 审批 10）→ 恰好一笔成功，另一笔 OVER_INBOUND
-  const po = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 10, reason: '并发验收' }, ops)
+  const po = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 10, reason: '并发验收', supplierName: '供应商A', unitPrice: 12 }, ops)
   await app.purchase.reviewOrder(po.id, true, '', fin)
   const r = await Promise.all([
     settled(app.purchase.inbound(po.id, { qty: 6 }, shipStaff)),
@@ -505,7 +505,7 @@ async function testPurchaseConcurrency() {
     `库存仅抬升 6（remain ${g.remain}/${remain0 + 6}，stock ${g.stock}/${stock0 + 6}）`)
 
   // 场景 2：两笔并发全额验收（各 10）→ 一笔入满完结，一笔被拦截，无丢失更新导致的双抬库存
-  const po2 = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 10, reason: '并发全额' }, ops)
+  const po2 = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 10, reason: '并发全额', supplierName: '供应商A', unitPrice: 12 }, ops)
   await app.purchase.reviewOrder(po2.id, true, '', fin)
   const r2 = await Promise.all([
     settled(app.purchase.inbound(po2.id, { qty: 10 }, shipStaff)),
@@ -523,7 +523,7 @@ async function testPurchaseConcurrency() {
     `两张采购单合计净入库 16，库存账与 PO 一致（remain ${g.remain}，stock ${g.stock}）`)
 
   // 场景 3：5 笔并发各 4（审批 10）→ 恰好 2 笔成功（累计 8），其余 3 笔拦截，不超收
-  const po3 = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 10, reason: '并发多笔' }, ops)
+  const po3 = await app.purchase.createOrder({ targetType: 'goods', targetId: 'g3', qty: 10, reason: '并发多笔', supplierName: '供应商A', unitPrice: 12 }, ops)
   await app.purchase.reviewOrder(po3.id, true, '', fin)
   const r3 = await Promise.all(Array.from({ length: 5 }, () =>
     settled(app.purchase.inbound(po3.id, { qty: 4 }, shipStaff))))
@@ -537,6 +537,131 @@ async function testPurchaseConcurrency() {
   await app.k.close()
 }
 
+async function testSupplierSettle() {
+  console.log('— 供应商结算闭环：验收差异 / 运营拟单 / 财务复核结算 / 批次×补发回写 / WAL 恢复 —')
+  const db = tmpDb('supplier')
+  let app = await createApp({ dbFile: db, autoResume: false })
+  await disableRisk(app)
+  const ops = staffCtx(app, 'm-star-ops')
+  const fin = staffCtx(app, 'm-star-fin')
+  const shipStaff = staffCtx(app, 'm-star-ship')
+  const g = app.k.state.goods.find((x) => x.id === 'g3')
+  const remain0 = g.remain
+
+  // RBAC
+  assert(app.auth.can(ops, 'supplier:bill') && !app.auth.can(ops, 'supplier:review'), '运营：可拟账单，不可复核')
+  assert(app.auth.can(fin, 'supplier:review') && app.auth.can(fin, 'supplier:settle') && !app.auth.can(fin, 'supplier:bill'),
+    '财务：可复核/结算，不可拟单')
+  assert(!app.auth.can(shipStaff, 'supplier:bill'), '仓配：不可拟账单')
+
+  // 采购 10 → 审批 → 首批到货 5（合格 3、验退 2）→ 次批合格 2 并短少 5 结案
+  const po = await app.purchase.createOrder(
+    { targetType: 'goods', targetId: 'g3', qty: 10, reason: '差异结算', supplierName: '供应商A', unitPrice: 10 }, ops)
+  await app.purchase.reviewOrder(po.id, true, '同意', fin)
+  const b1 = await app.purchase.inbound(po.id, { qty: 3, deliveredQty: 5, note: '2 件破损验退' }, shipStaff)
+  assert(b1.batch.rejectedQty === 2 && b1.order.rejectedQty === 2 && b1.order.status === 'receiving',
+    '首批：到货 5 / 合格 3 / 验退 2，采购单验收中')
+  assert(app.k.state.acceptDiffs.some((d) => d.poId === po.id && d.type === 'rejected' && d.qty === 2),
+    '验退拒收写入 append-only 验收差异')
+  assert(g.remain === remain0 + 3, '库存仅按合格量抬升 3（验退不入库）')
+  const b2 = await app.purchase.inbound(po.id, { qty: 2, deliveredQty: 2, closeShortage: true }, shipStaff)
+  assert(b2.order.status === 'diff_closed' && b2.order.shortQty === 5 && b2.order.inboundQty === 5,
+    '次批：短少 5 差异结案（合格合计 5）')
+  assert(g.remain === remain0 + 5, '库存共抬升 5（短少未到货不抬）')
+  assert(app.k.state.acceptDiffs.some((d) => d.type === 'short' && d.qty === 5), '到货短少写入验收差异')
+
+  // 运营拟单（草稿→提交）；财务驳回→运营修订重提→复核通过→结算
+  let draft = await app.supplier.createBill(po.id, { submit: false }, ops)
+  assert(draft.status === 'draft' && draft.payableAmount === 50, '草稿账单：合格 5 × 10 = 50')
+  let bill = await app.supplier.submitBill(draft.id, {}, ops)
+  assert(bill.status === 'reviewing', '运营提交账单 → 财务复核中')
+  bill = await app.supplier.reviewBill(bill.id, false, '补凭证', fin)
+  assert(bill.status === 'rejected', '财务驳回 → 待运营修订')
+  bill = await app.supplier.submitBill(bill.id, { note: '凭证已补' }, ops)
+  assert(bill.status === 'reviewing', '运营修订重提 → 复核中（账单 id 不变）')
+  let permErr = null
+  try { await app.auth.requirePerm(ops, 'supplier:review', 'supplier', '供应商账单复核') } catch (e) { permErr = e }
+  assert(permErr instanceof BizError && permErr.status === 403, '运营复核 403')
+  bill = await app.supplier.reviewBill(bill.id, true, '按合格 5 件结算', fin)
+  assert(bill.status === 'approved' && bill.payableAmount === 50, '复核通过：应付 50')
+  let settlePerm = null
+  try { await app.auth.requirePerm(ops, 'supplier:settle', 'supplier', '供应商结算付款') } catch (e) { settlePerm = e }
+  assert(settlePerm instanceof BizError && settlePerm.status === 403, '运营结算 403')
+  const settled = await app.supplier.settleBill(bill.id, '对公付款 50', fin)
+  assert(settled.status === 'settled' && settled.payableAmount === 50, '财务结算付款 50')
+  assert(!!settled.reconWriteback && settled.reconWriteback.acceptedQty === 5 &&
+    settled.reconWriteback.shortQty === 5 && settled.reconWriteback.rejectedQty === 2,
+    '结算回写库存对账快照（合格/短少/验退逐批勾稽）')
+  const poRow = app.k.state.purchaseOrders.find((x) => x.id === po.id)
+  assert(poRow.settledBillId === bill.id, '结算回写采购单 settledBillId')
+  let againErr = null
+  try { await app.supplier.settleBill(bill.id, '', fin) } catch (e) { againErr = e }
+  assert(againErr instanceof BizError && againErr.code === 'STATE_DENIED', '重复结算被状态机拦截')
+
+  // P7 采购结算对账闭环
+  const recon = app.supplier.computeRecon('t-star')
+  assert(recon.items.find((x) => x.poId === po.id)?.issues.length === 0, 'P7：差异结案采购已结算闭环')
+  assert(recon.settledPo >= 1, `P7：已闭环采购单计数 ${recon.settledPo}`)
+
+  // 售后补发占用：缺货挂起 → 采购入满 → 继续履约 → 账单复核时勾稽补发件不付款
+  const consumed = app.k.state.records.filter((r) => r.type === 'redeem' && r.goodsId === 'g4' && r.status !== 'revoked').length
+  const g4row = app.k.state.goods.find((x) => x.id === 'g4')
+  await app.k.commit([{ type: 'upsert', table: 'goods', row: { ...g4row, remain: 1, stock: consumed + 1 } }])
+  const customer = customerCtx(app)
+  const r = await app.trade.redeem('g4', customer, { idempotencyKey: 'sup-reship' })
+  const sp = await app.ship.createForRecord(app.k.state.records.find((x) => x.id === r.trade.id))
+  await app.ship.submitAddress(sp.shipment.id,
+    { receiver: '张三', phone: '13812345678', region: '上海市浦东新区', address: '张江路1号' }, customer)
+  await app.ship.ship(sp.shipment.id, { carrier: '顺丰', trackingNo: 'S1' }, shipStaff)
+  await app.ship.receive(sp.shipment.id, customer)
+  const asRow = await app.ship.applyAfterSale(sp.shipment.id, 'reship', '少件', customer)
+  await app.ship.reviewAfterSale(asRow.id, true, '缺货挂起', shipStaff)
+  const po2 = await app.purchase.createOrder(
+    { targetType: 'goods', targetId: 'g4', qty: 5, reason: '补发', afterSaleId: asRow.id, supplierName: '供应商B', unitPrice: 20 }, ops)
+  await app.purchase.reviewOrder(po2.id, true, '加急', fin)
+  await app.purchase.inbound(po2.id, { qty: 5 }, shipStaff)
+  const preBill = await app.supplier.createBill(po2.id, { submit: true }, ops)
+  assert(preBill.payableAmount === 100 && preBill.reshipPending === 1, '补发未履约：5×20=100 全额，并标记待履约')
+  const reconMid = app.supplier.computeRecon('t-star')
+  assert(reconMid.items.find((x) => x.poId === po2.id)?.issues.some((i) => i.kind === 'reship-pending'),
+    'P7 检出：补发未履约不得完成结算闭环')
+  await app.ship.reviewAfterSale(asRow.id, true, '到货补发', shipStaff)
+  const reviewed = await app.supplier.reviewBill(preBill.id, true, '重算', fin)
+  assert(reviewed.reshipQty === 1 && reviewed.billableQty === 4 && reviewed.payableAmount === 80,
+    '复核重算：补发占用 1 件不付款，应付 4×20=80')
+  const settled2 = await app.supplier.settleBill(preBill.id, '', fin)
+  assert(settled2.payableAmount === 80 && settled2.reconWriteback.reshipQty === 1,
+    '结算 80 并回写补发占用快照')
+  assert(app.k.state.auditLogs.some((l) => l.action === 'supplier-recon-reship'), '补发回写专项审计留痕')
+
+  // 审计动作齐全
+  ;['supplier-bill-create', 'supplier-bill-approve', 'supplier-bill-reject', 'supplier-settle',
+    'accept-diff-short', 'accept-diff-reject'].forEach((a) => {
+    assert(app.k.state.auditLogs.some((l) => l.action === a), `审计包含「${a}」`)
+  })
+
+  // 跨租户：云雀财务不可操作星河账单
+  const cloudFin = staffCtx(app, 'm-cloud-fin')
+  assert(cloudFin.tenantId === 't-cloud' && settled.tenantId === 't-star', '跨租户账单与员工分属不同租户')
+  let crossErr = null
+  try { await app.auth.requireSameTenant(cloudFin, settled.tenantId, 'supplier') } catch (e) { crossErr = e }
+  assert(crossErr instanceof BizError && crossErr.code === 'CROSS_TENANT', '跨租户操作被拦截（CROSS_TENANT）')
+
+  // WAL 恢复：账单/差异/回写快照完整恢复
+  const snap = { bills: app.k.state.supplierBills.length, diffs: app.k.state.acceptDiffs.length,
+    settledPayable: settled.payableAmount }
+  await app.k.close()
+  app = await createApp({ dbFile: db, autoResume: false })
+  assert(app.k.state.supplierBills.length === snap.bills, '供应商账单随 WAL 完整恢复')
+  assert(app.k.state.acceptDiffs.length === snap.diffs, '验收差异随 WAL 完整恢复')
+  const restored = app.supplier.requireBill(settled.id)
+  assert(restored.status === 'settled' && restored.payableAmount === snap.settledPayable && !!restored.reconWriteback,
+    '已结算账单与对账回写快照恢复一致')
+  const recon2 = app.supplier.computeRecon('t-star')
+  assert(recon2.items.find((x) => x.poId === po.id)?.issues.length === 0, '重启后 P7 对账仍闭环')
+  await app.k.close()
+}
+
 async function main() {
   await testConcurrency()
   await testIdempotency()
@@ -545,6 +670,7 @@ async function main() {
   await testRecon()
   await testPurchase()
   await testPurchaseConcurrency()
+  await testSupplierSettle()
   await testRbac()
   await testWALRecovery()
   if (failed) {

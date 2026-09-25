@@ -55,7 +55,7 @@
         </span>
       </div>
       <p class="rule-hint">
-        口径：P1 积分发生额（抽奖成本/中奖、兑换/返还、任务奖励）· P2 任务奖励逐笔台账 · P3 流水余额链 · P4 风控冻结单据与预占 · P5 库存账实 · P6 卡券账户（发券/核销勾稽、券码唯一、到期状态）。
+        口径：P1 积分发生额（抽奖成本/中奖、兑换/返还、任务奖励）· P2 任务奖励逐笔台账 · P3 流水余额链 · P4 风控冻结单据与预占 · P5 库存账实 · P6 卡券账户（发券/核销勾稽、券码唯一、到期状态）· P7 供应商采购结算闭环（独立于 P1–P6，在「供应商结算」页处理）。
         重复执行按差异签名幂等（账无变化不重建单、不重复补偿）；跨日补偿带业务日归属，原始记录一律保留。
       </p>
     </div>
@@ -211,6 +211,25 @@
             </span>
             <span v-if="cp.autoFixable" class="dr-fix ok-tag">{{ cp.kind === 'missing' ? '可自动补发新券' : '可自动补做到期' }}</span>
             <span v-else class="dr-fix warn-tag">需人工核查，不自动作废/改码</span>
+          </div>
+        </div>
+
+        <!-- P7 采购结算闭环（独立口径，不计入上方 openCount） -->
+        <div v-if="bill.diffs.purchase" class="diff-section p7">
+          <div class="ds-title">
+            P7 · 供应商结算与采购对账（批次验收 / 差异 / 售后补发回写）
+            <span class="ds-ok" v-if="bill.diffs.purchase.openCount === 0">
+              ✅ {{ bill.diffs.purchase.settledPo }} 张可结算采购单全部闭环
+            </span>
+            <span class="ds-bad" v-else>
+              🔗 {{ bill.diffs.purchase.openPo }} 张采购单有 {{ bill.diffs.purchase.openCount }} 项结算待办（在「供应商结算」处理，不计入 P1–P6 差异）
+            </span>
+          </div>
+          <div v-for="pr in bill.diffs.purchase.items" :key="pr.poId" class="p7-row" :class="{ open: pr.issues.length }">
+            <span class="p7-name">{{ pr.icon }} {{ pr.targetName }} <em>{{ pr.poNo }} · {{ pr.supplierName }}</em></span>
+            <span class="p7-qty">合格 {{ pr.acceptedQty }}/{{ pr.orderQty }}<template v-if="pr.shortQty"> · 短少 {{ pr.shortQty }}</template><template v-if="pr.rejectedQty"> · 验退 {{ pr.rejectedQty }}</template></span>
+            <span v-if="pr.billId" class="p7-bill" :class="pr.billStatus">账单 {{ pr.billStatus === 'settled' ? '已结算' : pr.billStatus === 'approved' ? '待结算' : pr.billStatus === 'reviewing' ? '复核中' : pr.billStatus === 'rejected' ? '待修订' : '草稿' }}<template v-if="pr.payableAmount !== null"> ¥{{ Number(pr.payableAmount).toFixed(2) }}</template></span>
+            <span v-else class="p7-bill none">未拟账单</span>
           </div>
         </div>
 
@@ -485,6 +504,25 @@ function couponDiffText(cp) {
 .ds-ok { font-size: 11px; font-weight: 400; background: rgba(76,175,80,0.13); color: #7ef0c9; padding: 2px 9px; border-radius: 5px; }
 .ds-bad { font-size: 11px; font-weight: 600; background: rgba(255,152,0,0.14); color: #ffb74d; padding: 2px 9px; border-radius: 5px; }
 .ds-bad.plus { background: rgba(239,83,80,0.14); color: #ef9a9a; }
+
+.p7 { border-color: rgba(77,182,172,0.25); }
+.p7-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  font-size: 11px; color: #aebadd; padding: 5px 0;
+}
+.p7-row.open .p7-name { color: #ffcc80; }
+.p7-name em { font-style: normal; color: #7e97c2; margin-left: 4px; }
+.p7-qty { color: #8ba2c8; }
+.p7-bill {
+  padding: 2px 9px; border-radius: 6px; font-size: 10px;
+  background: rgba(130,177,255,0.16); color: #82b1ff;
+}
+.p7-bill.settled { background: rgba(126,240,201,0.15); color: #7ef0c9; }
+.p7-bill.reviewing { background: rgba(255,183,77,0.16); color: #ffb74d; }
+.p7-bill.approved { background: rgba(130,177,255,0.25); color: #bbdefb; }
+.p7-bill.rejected { background: rgba(229,115,115,0.16); color: #ef9a9a; }
+.p7-bill.draft { background: rgba(111,132,171,0.2); color: #aebadd; }
+.p7-bill.none { background: rgba(229,115,115,0.12); color: #ef9a9a; }
 
 .p1-grid { display: flex; gap: 22px; margin: 10px 0 8px; }
 .p1-grid div { display: flex; flex-direction: column; }

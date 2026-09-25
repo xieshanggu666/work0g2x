@@ -14,6 +14,10 @@ const ACTION_LABELS = {
   'coupon-issue': '卡券发放', 'coupon-hold': '卡券预占', 'coupon-deliver': '放行发券',
   'coupon-release': '预占释放', 'coupon-redeem': '卡券核销', 'coupon-expire': '卡券到期', 'coupon-comp': '卡券补券',
   'recon-run': '对账执行', 'recon-review': '对账复核', 'recon-comp': '对账补偿',
+  'supplier-bill-create': '发起供应商账单', 'supplier-bill-approve': '账单复核通过',
+  'supplier-bill-reject': '账单复核驳回', 'supplier-settle': '供应商结算付款',
+  'supplier-bill-pending-reship': '账单补发待履约提示', 'supplier-recon-reship': '结算补发对账回写',
+  'accept-diff-short': '登记到货短少', 'accept-diff-reject': '登记验退拒收',
   'day-rollover': '业务日切换',
   'saga-resume': '故障续办', 'migration-run': '历史台账迁移',
   'activity-create': '新建活动', 'activity-toggle': '活动状态变更'
@@ -25,6 +29,8 @@ const PREFIX_MODULE = [
   ['freeze', 'risk'], ['release', 'risk'], ['revoke', 'risk'], ['appeal', 'risk'], ['config', 'risk'],
   ['task-settle', 'points'],
   ['ship-', 'ship'], ['aftersale-', 'aftersale'],
+  ['accept-', 'purchase'],
+  ['supplier-', 'supplier'],
   ['coupon-', 'coupon'], ['recon-', 'recon'], ['migration-', 'recon'],
   ['saga-resume', 'system'], ['day-rollover', 'system']
 ]

@@ -19,16 +19,21 @@ const g6 = () => s.goods.find((g) => g.id === g6id)
 const g6id = 'g6'
 const p1 = () => s.activities.find((a) => a.id === 'act-1').prizes.find((p) => p.id === 'p1')
 
-console.log('— 种子：采购三态（待审批 iPhone / 验收中公仔 / 已完成保温杯）+ 缺货挂起售后 —')
-assert(s.purchaseOrders.length === 3, `采购单种子 3 张（实际 ${s.purchaseOrders.length}）`)
+console.log('— 种子：采购四态（待审批 iPhone / 验收中公仔 / 已完成保温杯 / 差异结案福袋）+ 缺货挂起售后 + 供应商账单 —')
+assert(s.purchaseOrders.length === 4, `采购单种子 4 张（实际 ${s.purchaseOrders.length}）`)
 const po1 = s.purchaseOrders.find((o) => o.id === 'seed-po1')
 const po2 = s.purchaseOrders.find((o) => o.id === 'seed-po2')
 const po3 = s.purchaseOrders.find((o) => o.id === 'seed-po3')
+const po4 = s.purchaseOrders.find((o) => o.id === 'seed-po4')
 assert(po1.status === 'received' && po1.inboundQty === 50 && po1.batches.length === 2, '保温杯采购：已完成，两批 30+20')
 assert(po2.status === 'receiving' && po2.inboundQty === 6 && po2.qty === 10 && po2.afterSaleId === 'seed-as3',
   '公仔采购：分批验收中 6/10，关联缺货售后单')
 assert(po3.status === 'pending' && po3.targetType === 'prize', 'iPhone 采购：待审批（活动奖品）')
-assert(s.inboundBatches.length === 3, '验收批次台账 3 条（append-only）')
+assert(po4.status === 'diff_closed' && po4.inboundQty === 8 && po4.shortQty === 2 && po4.rejectedQty === 2,
+  '福袋采购：验收差异结案（合格 8 / 短少 2 / 验退 2）')
+assert(s.acceptDiffs.length === 2 && s.acceptDiffs.every((d) => d.poId === 'seed-po4'), '验收差异台账 2 条（短少 + 验退，append-only）')
+assert(s.supplierBills.length === 2, '供应商账单种子 2 张（保温杯已结算 / 福袋复核通过待结算）')
+assert(s.inboundBatches.length === 4, '验收批次台账 4 条（append-only）')
 assert(s.pendingPurchaseCount === 1 && s.pendingInboundCount === 1, '采购角标：待审批 1 / 待入库 1')
 const as3 = s.afterSales.find((a) => a.id === 'seed-as3')
 assert(as3.status === 'waiting_stock' && as3.type === 'reship', '种子售后单：公仔补发缺货挂起「待补货」')
@@ -55,7 +60,7 @@ assert(s.inboundPurchase(po2.id, { qty: 1 }) === null, '财务无验收权限，
 
 console.log('— 审批 / 驳回 / 撤销状态机 —')
 s.loginAsMember('m-star-ops')
-const myPo = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 3, reason: '运营补货测试' })
+const myPo = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 3, reason: '运营补货测试', supplierName: '潮玩供应仓', unitPrice: 18 })
 assert(!!myPo && myPo.status === 'pending', '运营发起采购成功（待审批）')
 // 仓配不能撤销别人的单
 s.loginAsMember('m-star-ship')
@@ -65,7 +70,7 @@ s.loginAsMember('m-star-ops')
 assert(s.cancelPurchaseOrder(myPo.id) === true && myPo.status === 'canceled', '发起人审批前撤销成功')
 assert(s.cancelPurchaseOrder(myPo.id) === false, '已撤销单重复撤销被状态机拦截')
 // 财务驳回
-const rejectPo = s.createPurchaseOrder({ targetType: 'prize', activityId: 'act-1', targetId: 'p1', qty: 1, reason: '应被驳回' })
+const rejectPo = s.createPurchaseOrder({ targetType: 'prize', activityId: 'act-1', targetId: 'p1', qty: 1, reason: '应被驳回', supplierName: '数码直供（深圳）', unitPrice: 5999 })
 s.loginAsMember('m-star-fin')
 assert(s.reviewPurchaseOrder(rejectPo.id, false, '预算不足') === true, '财务驳回采购')
 assert(rejectPo.status === 'rejected' && rejectPo.approver === '财务小周', '采购单 → 已驳回（记录审批人）')
@@ -75,7 +80,7 @@ assert(p1().stock === stockBeforeReject, '驳回不动库存（stock/remain 均�
 
 console.log('— 全链路：发起 → 审批 → 分批验收入库 → 自动完结 —')
 s.loginAsMember('m-star-ops')
-const po = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 5, reason: '商城补货' })
+const po = s.createPurchaseOrder({ targetType: 'goods', targetId: 'g6', qty: 5, reason: '商城补货', supplierName: '潮玩供应仓', unitPrice: 18 })
 const g6Before = g6().remain
 const g6StockBefore = g6().stock
 s.loginAsMember('m-star-fin')

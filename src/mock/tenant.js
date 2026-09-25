@@ -25,7 +25,10 @@ export const PERMISSION_GROUPS = [
     perms: [
       { key: 'purchase:apply', name: '发起采购申请（活动奖品/商城商品）' },
       { key: 'purchase:approve', name: '采购审批（通过/驳回）' },
-      { key: 'purchase:inbound', name: '分批验收入库' }
+      { key: 'purchase:inbound', name: '分批验收入库（登记验收差异）' },
+      { key: 'supplier:bill', name: '发起供应商账单（按采购批次拟单）' },
+      { key: 'supplier:review', name: '供应商账单财务复核' },
+      { key: 'supplier:settle', name: '供应商结算付款与对账回写' }
     ]
   },
   {
@@ -81,9 +84,9 @@ export const ROLE_TEMPLATES = [
   },
   {
     key: 'ops_activity', name: '活动运营', builtin: true,
-    desc: '负责抽奖活动与积分任务运营，可管理活动、发起奖品/商品采购、查看积分台账',
+    desc: '负责抽奖活动与积分任务运营，可管理活动、发起奖品/商品采购、发起供应商账单、查看积分台账',
     icon: '🎪',
-    permissions: ['activity:manage', 'points:view', 'ship:trace', 'purchase:apply']
+    permissions: ['activity:manage', 'points:view', 'ship:trace', 'purchase:apply', 'supplier:bill']
   },
   {
     key: 'risk_analyst', name: '风控专员', builtin: true,
@@ -99,9 +102,10 @@ export const ROLE_TEMPLATES = [
   },
   {
     key: 'finance_auditor', name: '财务对账', builtin: true,
-    desc: '负责采购审批、卡券核销、积分库存对账、复核补偿与全链路审计查看（只读业务运营）',
+    desc: '负责采购审批、供应商账单复核与结算、卡券核销、积分库存对账、复核补偿与全链路审计查看（只读业务运营）',
     icon: '🧮',
-    permissions: ['coupon:redeem', 'recon:run', 'recon:review', 'recon:compensate', 'audit:view', 'points:view', 'purchase:approve']
+    permissions: ['coupon:redeem', 'recon:run', 'recon:review', 'recon:compensate', 'audit:view', 'points:view',
+      'purchase:approve', 'supplier:review', 'supplier:settle']
   },
   {
     key: 'service_readonly', name: '客服（只读）', builtin: true,

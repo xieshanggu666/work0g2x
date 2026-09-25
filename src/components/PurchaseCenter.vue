@@ -91,6 +91,14 @@
           <input v-model.number="form.qty" type="number" min="1" max="9999" placeholder="审批数量（可分批验收入库）" />
         </div>
         <div class="cf-row">
+          <label>供应商</label>
+          <input v-model="form.supplierName" placeholder="必填：供应商名称（供应商结算依据）" />
+        </div>
+        <div class="cf-row">
+          <label>协议单价</label>
+          <input v-model.number="form.unitPrice" type="number" min="0.01" step="0.01" placeholder="必填：元/件（按实收合格量结算）" />
+        </div>
+        <div class="cf-row">
           <label>采购事由</label>
           <input v-model="form.reason" placeholder="必填，如：周年庆加码补货 / 售后缺货补发履约" />
         </div>
@@ -135,6 +143,7 @@
               <span v-if="o.afterSaleId" class="o-src shortage">🔗 售后补发 {{ o.afterSaleId }}</span>
             </div>
             <div class="o-sub">采购单 {{ o.poNo }}（{{ o.id }}）· {{ o.createdAt }} {{ o.time }}</div>
+            <div class="o-sub supplier">🏭 {{ o.supplierName || '—' }} · 协议单价 ¥{{ Number(o.unitPrice || 0).toFixed(2) }}/件</div>
           </div>
           <span class="o-status" :class="o.status">{{ statusMeta(o.status).label }}</span>
         </div>
@@ -170,12 +179,18 @@
           <template v-if="store.isOperator && store.can('purchase:inbound')">
             <div class="ib-row">
               <input v-model.number="batchOf(o).qty" type="number" min="1" :max="o.qty - o.inboundQty"
-                      :placeholder="`本次验收数量（待收 ${o.qty - o.inboundQty}）`" />
+                      :placeholder="`本批合格入库（待收 ${o.qty - o.inboundQty}）`" />
+              <input v-model.number="batchOf(o).deliveredQty" type="number" min="1"
+                      :placeholder="`本批到货量（默认=合格量）`" />
               <input v-model="batchOf(o).carrier" placeholder="供应商 / 承运方（可选）" />
-              <input v-model="batchOf(o).note" placeholder="验收备注（可选，如：首批抽检合格）" />
-              <button class="btn-inbound" @click="doInbound(o)">📥 验收入库 {{ o.qty - o.inboundQty }} 件内</button>
+              <input v-model="batchOf(o).note" placeholder="验收备注（如：2 件破损验退）" />
+              <label class="ib-close"><input type="checkbox" v-model="batchOf(o).closeShortage" /> 剩余短少不再补发，差异结案</label>
+              <button class="btn-inbound" @click="doInbound(o)">📥 验收入库</button>
             </div>
-            <span class="ib-tip">支持分批验收：本次数量 ≤ 待收 {{ o.qty - o.inboundQty }}；入满自动完结，库存 remain/stock 按实收同步抬升</span>
+            <span class="ib-tip">
+              支持分批验收：合格量 ≤ 待收 {{ o.qty - o.inboundQty }}；到货量 ≥ 合格量（多出部分登记「验退拒收」不入库）；
+              勾选「差异结案」则剩余待收按「到货短少」登记并提前结案
+            </span>
           </template>
           <span v-else class="waiting">🔒 当前角色无「分批验收入库」权限（物流客服/组织管理员），仅可查看待入库采购单</span>
         </div>
@@ -189,8 +204,25 @@
               {{ b.date }} {{ b.time }} · {{ b.inspector }} 验收
               <em v-if="b.carrier"> · 供应商/承运 {{ b.carrier }}</em>
               <em v-if="b.note"> · {{ b.note }}</em>
+              <em v-if="b.deliveredQty && b.deliveredQty !== b.qty" class="rej"> · 到货 {{ b.deliveredQty }} / 验退 {{ b.deliveredQty - b.qty }}</em>
+              <em v-if="b.shortQty" class="short"> · 短少 {{ b.shortQty }} 件结案</em>
             </span>
             <span class="bbi-stock">库存 {{ b.remainBefore }}→{{ b.remainAfter }}</span>
+          </div>
+        </div>
+
+        <!-- 验收差异与供应商结算状态 -->
+        <div v-if="diffsOf(o).length || billOf(o)" class="settle-box">
+          <div v-if="diffsOf(o).length" class="sb-diffs">
+            <span class="sb-label">⚠️ 验收差异：</span>
+            <span v-for="d in diffsOf(o)" :key="d.id" class="diff-chip" :class="d.type">
+              {{ d.type === 'short' ? '📉 到货短少' : '📤 验退拒收' }} ×{{ d.qty }}
+            </span>
+          </div>
+          <div v-if="billOf(o)" class="sb-bill">
+            💰 供应商账单 {{ billOf(o).billNo }}
+            <span class="bill-status" :class="billOf(o).status">{{ settleMeta(billOf(o).status).label }}</span>
+            <em>应付 ¥{{ Number(billOf(o).payableAmount).toFixed(2) }}（{{ billOf(o).supplierName }}）</em>
           </div>
         </div>
       </div>
@@ -200,11 +232,12 @@
 
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { usePlatformStore, PURCHASE_STATUS } from '@/store/platform'
+import { usePlatformStore, PURCHASE_STATUS, SETTLE_STATUS } from '@/store/platform'
 
 const store = usePlatformStore()
 
 const statusMeta = (s) => PURCHASE_STATUS[s] || { label: s }
+const settleMeta = (s) => SETTLE_STATUS[s] || { label: s }
 
 const stats = computed(() => ({
   pending: store.dashboard.purchasePending,
@@ -221,6 +254,7 @@ const filters = [
   { key: 'pending', label: '待审批' },
   { key: 'toInbound', label: '待入库/验收中' },
   { key: 'received', label: '入库完成' },
+  { key: 'diff_closed', label: '差异结案' },
   { key: 'closed', label: '驳回/撤销' },
   { key: 'all', label: '全部' }
 ]
@@ -258,7 +292,10 @@ const waitingAfterSales = computed(() =>
 
 // —— 发起采购表单 ——
 const showCreate = ref(false)
-const form = reactive({ targetType: 'goods', prizeKey: '', targetId: '', qty: 1, reason: '', afterSaleId: '' })
+const form = reactive({
+  targetType: 'goods', prizeKey: '', targetId: '', qty: 1,
+  supplierName: '', unitPrice: 10, reason: '', afterSaleId: ''
+})
 const linkedAfterSale = computed(() =>
   form.afterSaleId ? store.afterSales.find((a) => a.id === form.afterSaleId) : null)
 function pickType(t) {
@@ -268,7 +305,7 @@ function pickType(t) {
 }
 function resetForm() {
   form.targetType = 'goods'; form.prizeKey = ''; form.targetId = ''
-  form.qty = 1; form.reason = ''; form.afterSaleId = ''
+  form.qty = 1; form.supplierName = ''; form.unitPrice = 10; form.reason = ''; form.afterSaleId = ''
 }
 // 从待补货售后单预填采购表单（一键发起补货采购）
 function newPoForAfterSale(a) {
@@ -278,6 +315,8 @@ function newPoForAfterSale(a) {
   form.prizeKey = a.targetType === 'prize' ? `${a.activityId}::${a.targetId}` : ''
   form.targetId = a.targetType === 'goods' ? a.targetId : ''
   form.qty = 10
+  form.supplierName = ''
+  form.unitPrice = 10
   form.reason = `售后缺货补发履约（售后单 ${a.id}）：补货用于继续补发并恢复库存`
   form.afterSaleId = a.id
 }
@@ -287,6 +326,8 @@ function submitPo() {
     activityId: form.targetType === 'prize' ? (form.prizeKey || '').split('::')[0] : null,
     targetId: form.targetType === 'prize' ? (form.prizeKey || '').split('::')[1] : form.targetId,
     qty: form.qty,
+    supplierName: form.supplierName,
+    unitPrice: form.unitPrice,
     reason: form.reason,
     afterSaleId: form.afterSaleId || undefined
   }
@@ -314,18 +355,28 @@ function cancel(o) {
 }
 
 const batches = reactive({})
-const batchOf = (o) => (batches[o.id] || (batches[o.id] = { qty: o.qty - o.inboundQty, carrier: '', note: '' }))
+const batchOf = (o) => (batches[o.id] || (batches[o.id] = {
+  qty: o.qty - o.inboundQty, deliveredQty: undefined, carrier: '', note: '', closeShortage: false
+}))
 function doInbound(o) {
   const f = batchOf(o)
-  if (store.inboundPurchase(o.id, { qty: f.qty, carrier: f.carrier, note: f.note })) {
+  if (store.inboundPurchase(o.id, {
+    qty: f.qty, deliveredQty: f.deliveredQty, carrier: f.carrier, note: f.note,
+    closeShortage: f.closeShortage
+  })) {
     f.qty = o.qty - o.inboundQty
+    f.deliveredQty = undefined
     f.carrier = ''
     f.note = ''
+    f.closeShortage = false
   }
 }
 
 const batchesOf = (o) =>
   store.scopedInboundBatches.filter((b) => b.poId === o.id).sort((a, b) => b.ts - a.ts)
+// 采购单的验收差异 / 供应商账单
+const diffsOf = (o) => store.scopedAcceptDiffs.filter((d) => d.poId === o.id).sort((a, b) => b.ts - a.ts)
+const billOf = (o) => store.supplierBillOfPo(o.id)
 
 // 缺货补发：采购入库有库存后，从待处理售后继续履约
 function resumeAfterSale(a) {
@@ -458,6 +509,7 @@ function resumeAfterSale(a) {
 .po-order.pending { border-left-color: #ffb74d; }
 .po-order.approved, .po-order.receiving { border-left-color: #82b1ff; }
 .po-order.received { border-left-color: #7ef0c9; }
+.po-order.diff_closed { border-left-color: #ef5350; }
 .po-order.rejected, .po-order.canceled { border-left-color: #e57373; }
 .o-head { display: flex; align-items: center; gap: 10px; }
 .o-icon { font-size: 24px; }
@@ -466,11 +518,13 @@ function resumeAfterSale(a) {
 .o-src { font-size: 10px; color: #8ba2c8; font-weight: 400; }
 .o-src.shortage { color: #ef9a9a; }
 .o-sub { font-size: 10px; color: #6f84ab; margin-top: 2px; }
+.o-sub.supplier { color: #80cbc4; }
 .o-status { font-size: 11px; padding: 3px 10px; border-radius: 6px; font-weight: 600; flex-shrink: 0; }
 .o-status.pending { background: rgba(255,183,77,0.18); color: #ffb74d; }
 .o-status.approved { background: rgba(130,177,255,0.18); color: #82b1ff; }
 .o-status.receiving { background: rgba(130,177,255,0.28); color: #bbdefb; }
 .o-status.received { background: rgba(126,240,201,0.18); color: #7ef0c9; }
+.o-status.diff_closed { background: rgba(229,115,115,0.18); color: #ef9a9a; }
 .o-status.rejected, .po-order.canceled .o-status { background: rgba(229,115,115,0.18); color: #ef9a9a; }
 
 .po-body { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; }
@@ -522,5 +576,31 @@ function resumeAfterSale(a) {
 .bbi-qty { color: #7ef0c9; font-weight: 800; width: 34px; flex-shrink: 0; }
 .bbi-main { flex: 1; }
 .bbi-main em { font-style: normal; color: #7e97c2; }
+.bbi-main em.rej { color: #ffb74d; }
+.bbi-main em.short { color: #ef9a9a; }
 .bbi-stock { font-size: 10px; color: #7e97c2; white-space: nowrap; }
+
+.ib-close { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #ffcc80; white-space: nowrap; }
+.ib-close input { flex: none; min-width: 0; }
+
+.settle-box {
+  margin-top: 10px; display: flex; flex-direction: column; gap: 6px;
+  background: rgba(0,137,123,0.06); border: 1px solid rgba(77,182,172,0.22);
+  border-radius: 9px; padding: 8px 11px;
+}
+.sb-diffs { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 11px; }
+.sb-label { color: #7e97c2; }
+.diff-chip {
+  font-size: 10px; padding: 2px 9px; border-radius: 6px;
+}
+.diff-chip.short { background: rgba(229,115,115,0.16); color: #ef9a9a; }
+.diff-chip.rejected { background: rgba(255,183,77,0.16); color: #ffb74d; }
+.sb-bill { font-size: 11px; color: #aebadd; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.sb-bill em { font-style: normal; color: #ffd54f; }
+.bill-status { font-size: 10px; padding: 1px 8px; border-radius: 5px; background: rgba(130,177,255,0.18); color: #82b1ff; }
+.bill-status.settled { background: rgba(126,240,201,0.18); color: #7ef0c9; }
+.bill-status.reviewing { background: rgba(255,183,77,0.18); color: #ffb74d; }
+.bill-status.approved { background: rgba(130,177,255,0.25); color: #bbdefb; }
+.bill-status.rejected { background: rgba(229,115,115,0.18); color: #ef9a9a; }
+.bill-status.draft { background: rgba(111,132,171,0.2); color: #aebadd; }
 </style>

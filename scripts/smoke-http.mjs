@@ -120,7 +120,7 @@ async function main() {
   const finToken = (await api('POST', '/api/auth/member-login', { body: { memberId: 'm-star-fin' } })).json.token
   // 运营无审批权 → 403
   const createRes = await api('POST', '/api/purchases/create', {
-    token: opsToken, body: { targetType: 'goods', targetId: 'g3', qty: 10, reason: 'HTTP 采购补货' }
+    token: opsToken, body: { targetType: 'goods', targetId: 'g3', qty: 10, reason: 'HTTP 采购补货', supplierName: '供应商X', unitPrice: 15 }
   })
   assert(createRes.status === 200 && createRes.json.purchase.status === 'pending', '运营发起采购成功')
   const poId = createRes.json.purchase.id
@@ -145,6 +145,53 @@ async function main() {
   // 重复验收 → 409
   const ibDup = await api('POST', '/api/purchases/inbound', { token: shipToken, body: { purchaseId: poId, qty: 1 } })
   assert(ibDup.status === 409, '入库完成后重复验收 409')
+
+  console.log('— 供应商结算 API：验收差异 / 运营拟单 / 财务复核结算 —')
+  // 差异结案采购：到货 8、合格 6（验退 2），剩余 4 件短少结案
+  const diffPoRes = await api('POST', '/api/purchases/create', {
+    token: opsToken, body: { targetType: 'goods', targetId: 'g3', qty: 10, reason: 'HTTP 差异采购', supplierName: '供应商Y', unitPrice: 11 }
+  })
+  assert(diffPoRes.status === 200, '差异采购发起成功')
+  const diffPoId = diffPoRes.json.purchase.id
+  await api('POST', '/api/purchases/review', { token: finToken, body: { purchaseId: diffPoId, approve: true, note: 'ok' } })
+  const diffIb = await api('POST', '/api/purchases/inbound', {
+    token: shipToken, body: { purchaseId: diffPoId, qty: 6, deliveredQty: 8, note: '2 件验退', closeShortage: true }
+  })
+  assert(diffIb.status === 200 && diffIb.json.order.status === 'diff_closed' && diffIb.json.order.shortQty === 4,
+    '到货 8/合格 6/验退 2，短少 4 差异结案')
+  const poList2 = await api('GET', '/api/purchases', { token: opsToken })
+  assert(poList2.json.acceptDiffs.filter((d) => d.poId === diffPoId).length === 2, 'GET 采购返回验收差异（短少+验退 2 条）')
+  const shipBill = await api('POST', '/api/supplier/bills/create', { token: shipToken, body: { purchaseId: diffPoId } })
+  assert(shipBill.status === 403, '仓配拟供应商账单 403')
+  const billRes = await api('POST', '/api/supplier/bills/create', {
+    token: opsToken, body: { purchaseId: diffPoId, submit: true, note: '按合格 6 件结算' }
+  })
+  assert(billRes.status === 200 && billRes.json.bill.status === 'reviewing' && billRes.json.bill.payableAmount === 66,
+    `运营提交账单（合格 6×11=66，实际 ${billRes.json.bill?.payableAmount}）`)
+  const billId = billRes.json.bill.id
+  const opsReview = await api('POST', '/api/supplier/bills/review', { token: opsToken, body: { billId, approve: true } })
+  assert(opsReview.status === 403, '运营复核账单 403')
+  const rej = await api('POST', '/api/supplier/bills/review', { token: finToken, body: { billId, approve: false, note: '补凭证' } })
+  assert(rej.status === 200 && rej.json.bill.status === 'rejected', '财务驳回账单')
+  const resub = await api('POST', '/api/supplier/bills/submit', { token: opsToken, body: { billId, note: '凭证补齐' } })
+  assert(resub.status === 200 && resub.json.bill.status === 'reviewing' && resub.json.bill.id === billId, '运营修订重提（id 不变）')
+  const approveBill = await api('POST', '/api/supplier/bills/review', { token: finToken, body: { billId, approve: true, note: '同意' } })
+  assert(approveBill.status === 200 && approveBill.json.bill.status === 'approved', '财务复核通过')
+  const opsSettle = await api('POST', '/api/supplier/bills/settle', { token: opsToken, body: { billId } })
+  assert(opsSettle.status === 403, '运营结算 403')
+  const settleRes = await api('POST', '/api/supplier/bills/settle', { token: finToken, body: { billId, note: '对公付款 66 元' } })
+  assert(settleRes.status === 200 && settleRes.json.bill.status === 'settled' &&
+    settleRes.json.bill.reconWriteback.acceptedQty === 6 &&
+    settleRes.json.bill.reconWriteback.shortQty === 4 &&
+    settleRes.json.bill.reconWriteback.rejectedQty === 2,
+    '财务结算成功并回写库存对账快照（合格6/短少4/验退2）')
+  const bills = await api('GET', '/api/supplier/bills', { token: finToken })
+  assert(bills.json.bills.some((b) => b.id === billId && b.status === 'settled'), 'GET 账单列表含已结算单')
+  const sRecon = await api('GET', '/api/supplier/recon', { token: finToken })
+  const srow = sRecon.json.recon.items.find((x) => x.poId === diffPoId)
+  assert(!!srow && srow.issues.length === 0, '采购结算对账：该单已闭环')
+  const settleDup = await api('POST', '/api/supplier/bills/settle', { token: finToken, body: { billId } })
+  assert(settleDup.status === 409, '重复结算 409')
 
   console.log('— 故障注入 → 重启 → 启动自动续办 —')
   // 平台在抽奖扣分后注入故障，触发一次 act-2 抽奖（10 积分）应返回 500
